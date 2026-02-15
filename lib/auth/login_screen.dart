@@ -15,16 +15,30 @@ class AdminLoginScreen extends StatefulWidget {
 
 class _AdminLoginScreenState extends State<AdminLoginScreen> {
   static const _kRememberKey = 'admin_remember_me';
-  static const _kEmailKey = 'admin_email';
+  static const _kUsernameKey = 'admin_username';
 
-  final _emailController = TextEditingController();
-  final _passwordController = TextEditingController();
+  final _usernameController = TextEditingController();
+  final _pinController = TextEditingController();
+  final _otpController = TextEditingController();
+  final _newPinController = TextEditingController();
+  final _confirmPinController = TextEditingController();
 
   late final AdminService _service;
 
-  bool _isLoading = false;
   bool _rememberMe = true;
-  bool _showPassword = false;
+  bool _showPin = false;
+  bool _showNewPin = false;
+  bool _showConfirmPin = false;
+
+  bool _loggingIn = false;
+  bool _requestingOtp = false;
+  bool _verifyingOtp = false;
+
+  String? _challengeId;
+  String? _otpDelivery;
+  String? _status;
+
+  bool get _busy => _loggingIn || _requestingOtp || _verifyingOtp;
 
   @override
   void initState() {
@@ -35,8 +49,11 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
 
   @override
   void dispose() {
-    _emailController.dispose();
-    _passwordController.dispose();
+    _usernameController.dispose();
+    _pinController.dispose();
+    _otpController.dispose();
+    _newPinController.dispose();
+    _confirmPinController.dispose();
     super.dispose();
   }
 
@@ -44,18 +61,16 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
     try {
       final prefs = await SharedPreferences.getInstance();
       final remember = prefs.getBool(_kRememberKey) ?? true;
-      final email = prefs.getString(_kEmailKey) ?? '';
+      final username = prefs.getString(_kUsernameKey) ?? '';
 
       if (!mounted) return;
       setState(() {
         _rememberMe = remember;
-        if (remember && email.isNotEmpty) {
-          _emailController.text = email;
+        if (remember && username.isNotEmpty) {
+          _usernameController.text = username;
         }
       });
-    } catch (_) {
-      // ignore (no drama if prefs fails)
-    }
+    } catch (_) {}
   }
 
   Future<void> _persistRemembered() async {
@@ -64,38 +79,63 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
       await prefs.setBool(_kRememberKey, _rememberMe);
 
       if (_rememberMe) {
-        await prefs.setString(_kEmailKey, _emailController.text.trim());
+        await prefs.setString(_kUsernameKey, _username());
       } else {
-        await prefs.remove(_kEmailKey);
+        await prefs.remove(_kUsernameKey);
       }
-    } catch (_) {
-      // ignore
-    }
+    } catch (_) {}
   }
 
-  Future<void> _handleLogin() async {
-    if (_isLoading) return;
+  String _username() => _usernameController.text.trim().toLowerCase();
 
-    final email = _emailController.text.trim();
-    final pw = _passwordController.text;
+  String? _validateUsername() {
+    final value = _username();
+    if (value.isEmpty) return 'Please enter your admin username.';
+    if (!RegExp(r'^[a-z0-9_-]{3,60}$').hasMatch(value)) {
+      return 'Username must use only letters, numbers, _ or -';
+    }
+    return null;
+  }
 
-    if (email.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter your admin email.')),
-      );
+  String? _validatePin(String value, {String label = 'PIN'}) {
+    final v = value.trim();
+    if (v.isEmpty) return 'Please enter $label.';
+    if (!RegExp(r'^[0-9]{4,8}$').hasMatch(v)) {
+      return '$label must be 4 to 8 digits.';
+    }
+    return null;
+  }
+
+  void _toast(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(
+      context,
+    ).showSnackBar(SnackBar(content: Text(message)));
+  }
+
+  Future<void> _loginWithPin() async {
+    if (_busy) return;
+
+    final usernameError = _validateUsername();
+    final pinError = _validatePin(_pinController.text);
+
+    if (usernameError != null) {
+      _toast(usernameError);
       return;
     }
-    if (pw.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('Please enter your password.')),
-      );
+    if (pinError != null) {
+      _toast(pinError);
       return;
     }
 
-    setState(() => _isLoading = true);
+    setState(() => _loggingIn = true);
 
     try {
-      await _service.login(email: email, password: pw);
+      await _service.loginWithPin(
+        username: _username(),
+        pin: _pinController.text.trim(),
+      );
+
       await _persistRemembered();
 
       if (!mounted) return;
@@ -104,18 +144,120 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
         MaterialPageRoute(builder: (_) => const AdminDashboard()),
       );
     } catch (e) {
-      if (!mounted) return;
-      ScaffoldMessenger.of(
-        context,
-      ).showSnackBar(SnackBar(content: Text('Login failed: $e')));
+      _toast('Login failed: $e');
     } finally {
-      if (mounted) setState(() => _isLoading = false);
+      if (mounted) setState(() => _loggingIn = false);
+    }
+  }
+
+  Future<void> _requestOtp() async {
+    if (_busy) return;
+
+    final usernameError = _validateUsername();
+    if (usernameError != null) {
+      _toast(usernameError);
+      return;
+    }
+
+    setState(() {
+      _requestingOtp = true;
+      _status = null;
+    });
+
+    try {
+      final challenge = await _service.requestOtp(username: _username());
+      if (!mounted) return;
+
+      if ((challenge.retryAfterSeconds ?? 0) > 0 &&
+          challenge.challengeId.isEmpty) {
+        _toast(
+          'OTP was sent recently. Retry in ${challenge.retryAfterSeconds}s.',
+        );
+        return;
+      }
+
+      setState(() {
+        _challengeId = challenge.challengeId;
+        _otpDelivery = challenge.phoneMasked;
+        _status = challenge.pinConfigured
+            ? 'OTP sent. Enter OTP + new PIN to reset your PIN.'
+            : 'OTP sent. Enter OTP + new PIN to complete first-time setup.';
+      });
+
+      _toast(
+        _otpDelivery == null
+            ? 'OTP sent via WhatsApp.'
+            : 'OTP sent to $_otpDelivery',
+      );
+    } catch (e) {
+      _toast('OTP request failed: $e');
+    } finally {
+      if (mounted) setState(() => _requestingOtp = false);
+    }
+  }
+
+  Future<void> _verifyOtpAndSetPin() async {
+    if (_busy) return;
+
+    final usernameError = _validateUsername();
+    if (usernameError != null) {
+      _toast(usernameError);
+      return;
+    }
+
+    if ((_challengeId ?? '').trim().isEmpty) {
+      _toast('Request OTP first.');
+      return;
+    }
+
+    final otp = _otpController.text.trim();
+    if (!RegExp(r'^[0-9]{6}$').hasMatch(otp)) {
+      _toast('OTP must be 6 digits.');
+      return;
+    }
+
+    final newPin = _newPinController.text.trim();
+    final confirmPin = _confirmPinController.text.trim();
+
+    final pinError = _validatePin(newPin, label: 'new PIN');
+    if (pinError != null) {
+      _toast(pinError);
+      return;
+    }
+
+    if (newPin != confirmPin) {
+      _toast('PIN confirmation does not match.');
+      return;
+    }
+
+    setState(() => _verifyingOtp = true);
+
+    try {
+      await _service.verifyOtpAndSetPin(
+        username: _username(),
+        challengeId: _challengeId!,
+        otpCode: otp,
+        pin: newPin,
+        pinConfirmation: confirmPin,
+      );
+
+      await _persistRemembered();
+
+      if (!mounted) return;
+      Navigator.pushReplacement(
+        context,
+        MaterialPageRoute(builder: (_) => const AdminDashboard()),
+      );
+    } catch (e) {
+      _toast('OTP verify failed: $e');
+    } finally {
+      if (mounted) setState(() => _verifyingOtp = false);
     }
   }
 
   @override
   Widget build(BuildContext context) {
-    final disabled = _isLoading;
+    final disabled = _busy;
 
     return Scaffold(
       body: Stack(
@@ -126,131 +268,220 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
             fit: BoxFit.cover,
             errorBuilder: (_, __, ___) => Container(color: Colors.black),
           ),
-          Container(color: Colors.black.withOpacity(0.55)),
+          Container(color: Colors.black.withOpacity(0.58)),
           Center(
             child: ConstrainedBox(
-              constraints: const BoxConstraints(maxWidth: 480),
+              constraints: const BoxConstraints(maxWidth: 540),
               child: Container(
-                padding: const EdgeInsets.all(32),
+                padding: const EdgeInsets.all(26),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.60),
+                  color: Colors.black.withOpacity(0.64),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white.withOpacity(0.12)),
-                  boxShadow: const [
-                    BoxShadow(color: Colors.black54, blurRadius: 18),
-                  ],
+                  border: Border.all(color: Colors.white.withOpacity(0.14)),
                 ),
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Image.asset(
-                      'assets/images/icon.png',
-                      height: 74,
-                      width: 74,
-                      errorBuilder: (_, __, ___) => const Icon(
-                        Icons.security,
-                        size: 66,
-                        color: Colors.amber,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.stretch,
+                    children: [
+                      Image.asset(
+                        'assets/images/icon.png',
+                        height: 72,
+                        width: 72,
+                        errorBuilder: (_, __, ___) => const Icon(
+                          Icons.admin_panel_settings,
+                          size: 64,
+                          color: Colors.amber,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 14),
-                    const Text(
-                      "Weather Hooligan Admin",
-                      style: TextStyle(
-                        fontSize: 22,
-                        fontWeight: FontWeight.bold,
-                        color: Colors.white,
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Weather Hooligan Members Admin',
+                        textAlign: TextAlign.center,
+                        style: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.bold,
+                          color: Colors.white,
+                        ),
                       ),
-                    ),
-                    const SizedBox(height: 26),
-
-                    TextField(
-                      controller: _emailController,
-                      enabled: !disabled,
-                      keyboardType: TextInputType.emailAddress,
-                      decoration: const InputDecoration(
-                        labelText: "Admin Email",
-                        border: OutlineInputBorder(),
+                      const SizedBox(height: 20),
+                      TextField(
+                        controller: _usernameController,
+                        enabled: !disabled,
+                        decoration: const InputDecoration(
+                          labelText: 'Admin Username',
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.person_outline),
+                        ),
+                        onSubmitted: (_) => _loginWithPin(),
                       ),
-                      onSubmitted: (_) => _handleLogin(),
-                    ),
-                    const SizedBox(height: 16),
-
-                    TextField(
-                      controller: _passwordController,
-                      enabled: !disabled,
-                      obscureText: !_showPassword,
-                      decoration: InputDecoration(
-                        labelText: "Password",
-                        border: const OutlineInputBorder(),
-                        suffixIcon: IconButton(
-                          tooltip: _showPassword
-                              ? 'Hide password'
-                              : 'Show password',
-                          onPressed: disabled
-                              ? null
-                              : () => setState(
-                                  () => _showPassword = !_showPassword,
+                      const SizedBox(height: 12),
+                      TextField(
+                        controller: _pinController,
+                        enabled: !disabled,
+                        obscureText: !_showPin,
+                        decoration: InputDecoration(
+                          labelText: 'PIN',
+                          border: const OutlineInputBorder(),
+                          prefixIcon: const Icon(Icons.pin_outlined),
+                          suffixIcon: IconButton(
+                            onPressed: disabled
+                                ? null
+                                : () => setState(() => _showPin = !_showPin),
+                            icon: Icon(
+                              _showPin
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                            ),
+                          ),
+                        ),
+                        onSubmitted: (_) => _loginWithPin(),
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Checkbox(
+                            value: _rememberMe,
+                            onChanged: disabled
+                                ? null
+                                : (v) =>
+                                      setState(() => _rememberMe = v ?? true),
+                          ),
+                          const Expanded(
+                            child: Text(
+                              'Remember username',
+                              style: TextStyle(color: Colors.white70),
+                            ),
+                          ),
+                          TextButton(
+                            onPressed: disabled ? null : _requestOtp,
+                            child: const Text('Forgot PIN?'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      FilledButton.icon(
+                        onPressed: disabled ? null : _loginWithPin,
+                        icon: _loggingIn
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
                                 ),
-                          icon: Icon(
-                            _showPassword
-                                ? Icons.visibility_off
-                                : Icons.visibility,
-                          ),
+                              )
+                            : const Icon(Icons.login),
+                        label: Text(
+                          _loggingIn ? 'Logging in...' : 'Login with PIN',
                         ),
                       ),
-                      onSubmitted: (_) => _handleLogin(),
-                    ),
-
-                    const SizedBox(height: 10),
-
-                    Row(
-                      children: [
-                        Checkbox(
-                          value: _rememberMe,
-                          onChanged: disabled
-                              ? null
-                              : (v) => setState(() => _rememberMe = v ?? true),
-                        ),
-                        const Expanded(
-                          child: Text(
-                            'Remember me',
-                            style: TextStyle(color: Colors.white70),
-                          ),
-                        ),
-                        TextButton(
-                          onPressed: disabled
-                              ? null
-                              : () {
-                                  _passwordController.clear();
-                                  ScaffoldMessenger.of(context).showSnackBar(
-                                    const SnackBar(
-                                      content: Text(
-                                        'Ask admin to reset your password in Tools → Reset password.',
-                                      ),
-                                    ),
-                                  );
-                                },
-                          child: const Text('Forgot password?'),
+                      const SizedBox(height: 20),
+                      const Divider(),
+                      const SizedBox(height: 10),
+                      const Text(
+                        'First-time setup or reset PIN',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 10),
+                      OutlinedButton.icon(
+                        onPressed: disabled ? null : _requestOtp,
+                        icon: _requestingOtp
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.chat_outlined),
+                        label: const Text('Request OTP via WhatsApp'),
+                      ),
+                      if ((_status ?? '').trim().isNotEmpty) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _status!,
+                          style: const TextStyle(color: Colors.white70),
                         ),
                       ],
-                    ),
-
-                    const SizedBox(height: 10),
-
-                    disabled
-                        ? const Padding(
-                            padding: EdgeInsets.symmetric(vertical: 6),
-                            child: CircularProgressIndicator(),
-                          )
-                        : ElevatedButton(
-                            style: ElevatedButton.styleFrom(
-                              minimumSize: const Size(double.infinity, 50),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _otpController,
+                        enabled: !disabled,
+                        keyboardType: TextInputType.number,
+                        decoration: const InputDecoration(
+                          labelText: 'OTP Code (6 digits)',
+                          border: OutlineInputBorder(),
+                          prefixIcon: Icon(Icons.sms_outlined),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _newPinController,
+                        enabled: !disabled,
+                        obscureText: !_showNewPin,
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          labelText: 'New PIN (4-8 digits)',
+                          border: const OutlineInputBorder(),
+                          prefixIcon: const Icon(Icons.password_outlined),
+                          suffixIcon: IconButton(
+                            onPressed: disabled
+                                ? null
+                                : () => setState(
+                                    () => _showNewPin = !_showNewPin,
+                                  ),
+                            icon: Icon(
+                              _showNewPin
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
                             ),
-                            onPressed: _handleLogin,
-                            child: const Text("Login to Dashboard"),
                           ),
-                  ],
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      TextField(
+                        controller: _confirmPinController,
+                        enabled: !disabled,
+                        obscureText: !_showConfirmPin,
+                        keyboardType: TextInputType.number,
+                        decoration: InputDecoration(
+                          labelText: 'Confirm PIN',
+                          border: const OutlineInputBorder(),
+                          prefixIcon: const Icon(Icons.password),
+                          suffixIcon: IconButton(
+                            onPressed: disabled
+                                ? null
+                                : () => setState(
+                                    () => _showConfirmPin = !_showConfirmPin,
+                                  ),
+                            icon: Icon(
+                              _showConfirmPin
+                                  ? Icons.visibility_off
+                                  : Icons.visibility,
+                            ),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 10),
+                      FilledButton.icon(
+                        onPressed: disabled ? null : _verifyOtpAndSetPin,
+                        icon: _verifyingOtp
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.verified_outlined),
+                        label: Text(
+                          _verifyingOtp
+                              ? 'Verifying...'
+                              : 'Verify OTP + Set PIN',
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ),
             ),
