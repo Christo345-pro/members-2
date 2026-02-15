@@ -1,0 +1,48 @@
+{
+  "project_info": {
+    "project_number": "315794872861",
+    "project_id": "weather-hooligan-app",
+    "storage_bucket": "weather-hooligan-app.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:315794872861:android:6d9adce2ce3ed3c30ec4f4",
+        "android_client_info": {
+          "package_name": "com.example.weather_hooligan"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCZ5mrJhX6DPXK9urRYF2ZCllHped9hx7k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:315794872861:android:f585bffc96b67e8f0ec4f4",
+        "android_client_info": {
+          "package_name": "com.weather_hooligan.members"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCZ5mrJhX6DPXK9urRYF2ZCllHped9hx7k"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
