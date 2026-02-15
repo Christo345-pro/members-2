@@ -7,8 +7,8 @@ bool get isAndroid =>
 bool get isWindows =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
 
-bool get supportsLocalDb => isWindows;
-bool get supportsAdsUpload => isWindows;
+bool get supportsLocalDb => false;
+bool get supportsAdsUpload => true;
 bool get supportsAdminPush => isAndroid;
 
 String get adminAppType =>

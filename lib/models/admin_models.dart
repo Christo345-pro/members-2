@@ -351,8 +351,8 @@ class AdminInvoice {
     final userMap = user is Map ? user.cast<String, dynamic>() : const {};
     return AdminInvoice(
       id: _parseInt(j['id']),
-      invoiceNumber:
-          (j['invoice_number'] ?? j['invoiceNumber'] ?? '').toString(),
+      invoiceNumber: (j['invoice_number'] ?? j['invoiceNumber'] ?? '')
+          .toString(),
       token: (j['token'] ?? '').toString(),
       status: (j['status'] ?? '').toString(),
       currency: (j['currency'] ?? 'ZAR').toString(),
@@ -369,7 +369,8 @@ class AdminInvoice {
       username: (userMap['username'] ?? j['username'] ?? '').toString(),
       email: (userMap['email'] ?? j['email'] ?? '').toString(),
       accountNumber: _readString(
-        userMap['account_number'] ?? userMap['accountNumber'] ??
+        userMap['account_number'] ??
+            userMap['accountNumber'] ??
             j['account_number'] ??
             j['accountNumber'],
       ),

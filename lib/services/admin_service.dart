@@ -1,4 +1,3 @@
-// lib/services/admin_service.dart
 import 'dart:convert';
 import 'dart:typed_data';
 
@@ -7,96 +6,211 @@ import 'package:http/http.dart' as http;
 import '../models/admin_models.dart';
 import '../platform/platform_features.dart';
 
+class AdminOtpChallenge {
+  final String challengeId;
+  final bool pinConfigured;
+  final int? expiresInSeconds;
+  final int? retryAfterSeconds;
+  final String? phoneMasked;
+
+  const AdminOtpChallenge({
+    required this.challengeId,
+    required this.pinConfigured,
+    this.expiresInSeconds,
+    this.retryAfterSeconds,
+    this.phoneMasked,
+  });
+}
+
 class AdminService {
   static const String _baseUrl = 'https://weather-hooligan.co.za';
-  static const Duration _timeout = Duration(seconds: 25);
+  static const Duration _timeout = Duration(seconds: 30);
 
   static String? _token;
 
   static void setToken(String token) => _token = token.trim();
   static String? get token => _token;
+  static bool get hasToken => (_token ?? '').trim().isNotEmpty;
 
-  // ---------------------------
-  // Headers
-  // ---------------------------
-  Map<String, String> _headers({bool jsonBody = false}) {
+  Map<String, String> _headers({
+    bool jsonBody = false,
+    bool requireAuth = true,
+  }) {
     final t = (_token ?? '').trim();
-    if (t.isEmpty) {
+    if (requireAuth && t.isEmpty) {
       throw Exception('No admin token set. Please login again.');
     }
+
     return <String, String>{
       'Accept': 'application/json',
-      'Authorization': 'Bearer $t',
+      if (requireAuth) 'Authorization': 'Bearer $t',
       if (jsonBody) 'Content-Type': 'application/json',
     };
   }
 
-  // ---------------------------
-  // Auth
-  // ---------------------------
-  Future<String> login({
-    required String email,
-    required String password,
+  Future<void> loginWithPin({
+    required String username,
+    required String pin,
   }) async {
-    final appType = adminAppType;
-    final deviceName = adminDeviceName;
-    final uri = Uri.parse('$_baseUrl/api/admin/login');
+    final uri = Uri.parse('$_baseUrl/api/admin/auth/login-pin');
 
     final res = await http
         .post(
           uri,
-          headers: const {
-            'Accept': 'application/json',
-            'Content-Type': 'application/json',
-          },
+          headers: _headers(jsonBody: true, requireAuth: false),
           body: jsonEncode({
-            'email': email.trim(),
-            'password': password,
-            'app_type': appType,
-            'device_name': deviceName,
-            'force_login': true,
+            'username': username.trim().toLowerCase(),
+            'pin': pin.trim(),
+            'app_type': adminAppType,
+            'device_name': adminDeviceName,
           }),
         )
         .timeout(_timeout);
 
     final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final tok = (body is Map ? body['token'] : null)?.toString().trim();
-      if (tok == null || tok.isEmpty) {
-        throw Exception('Login succeeded but token missing.');
-      }
-      setToken(tok);
-      return tok;
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception(
+        _extractMessage(body) ?? 'PIN login failed (${res.statusCode}).',
+      );
     }
 
-    throw Exception(
-      _extractMessage(body) ?? 'Login failed (${res.statusCode}).',
+    final tok = _tokenFromBody(body);
+    if (tok.isEmpty) {
+      throw Exception('PIN login succeeded but token is missing.');
+    }
+
+    setToken(tok);
+  }
+
+  Future<AdminOtpChallenge> requestOtp({required String username}) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/auth/request-otp');
+
+    final res = await http
+        .post(
+          uri,
+          headers: _headers(jsonBody: true, requireAuth: false),
+          body: jsonEncode({'username': username.trim().toLowerCase()}),
+        )
+        .timeout(_timeout);
+
+    final body = _safeJson(res.body);
+
+    if (res.statusCode == 429 && body is Map) {
+      return AdminOtpChallenge(
+        challengeId: '',
+        pinConfigured: false,
+        retryAfterSeconds: int.tryParse('${body['retry_after_seconds'] ?? ''}'),
+      );
+    }
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception(
+        _extractMessage(body) ?? 'OTP request failed (${res.statusCode}).',
+      );
+    }
+
+    final map = body is Map
+        ? body.cast<String, dynamic>()
+        : <String, dynamic>{};
+    final delivery = map['delivery'];
+    final deliveryMap = delivery is Map
+        ? delivery.cast<String, dynamic>()
+        : <String, dynamic>{};
+
+    return AdminOtpChallenge(
+      challengeId: (map['challenge_id'] ?? '').toString(),
+      pinConfigured: map['pin_configured'] == true,
+      expiresInSeconds: int.tryParse('${map['expires_in_seconds'] ?? ''}'),
+      retryAfterSeconds: int.tryParse('${map['retry_after_seconds'] ?? ''}'),
+      phoneMasked: (deliveryMap['phone_masked'] ?? '').toString().trim().isEmpty
+          ? null
+          : (deliveryMap['phone_masked'] ?? '').toString().trim(),
     );
   }
 
-  // ---------------------------
-  // Users
-  // ---------------------------
-  Future<List<AdminUser>> fetchUsers() async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users');
+  Future<void> verifyOtpAndSetPin({
+    required String username,
+    required String challengeId,
+    required String otpCode,
+    required String pin,
+    required String pinConfirmation,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/auth/verify-otp');
+
+    final res = await http
+        .post(
+          uri,
+          headers: _headers(jsonBody: true, requireAuth: false),
+          body: jsonEncode({
+            'username': username.trim().toLowerCase(),
+            'challenge_id': challengeId.trim(),
+            'otp_code': otpCode.trim(),
+            'pin': pin.trim(),
+            'pin_confirmation': pinConfirmation.trim(),
+            'app_type': adminAppType,
+            'device_name': adminDeviceName,
+          }),
+        )
+        .timeout(_timeout);
+
+    final body = _safeJson(res.body);
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception(
+        _extractMessage(body) ?? 'OTP verification failed (${res.statusCode}).',
+      );
+    }
+
+    final tok = _tokenFromBody(body);
+    if (tok.isEmpty) {
+      throw Exception('OTP verification succeeded but token is missing.');
+    }
+
+    setToken(tok);
+  }
+
+  Future<void> logout() async {
+    if (!hasToken) return;
+
+    final uri = Uri.parse('$_baseUrl/api/admin/auth/logout');
+    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
+
+    final body = _safeJson(res.body);
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception(
+        _extractMessage(body) ?? 'Logout failed (${res.statusCode}).',
+      );
+    }
+
+    _token = null;
+  }
+
+  Future<List<AdminUser>> fetchMembers({String? query, int limit = 200}) async {
+    final params = <String, String>{'limit': '$limit'};
+    if ((query ?? '').trim().isNotEmpty) params['q'] = query!.trim();
+
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/users',
+    ).replace(queryParameters: params);
 
     final res = await http.get(uri, headers: _headers()).timeout(_timeout);
     final body = _safeJson(res.body);
 
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (body is List) {
-        return body.map((e) => AdminUser.fromJson(e)).toList();
+        return body
+            .whereType<Map>()
+            .map((e) => AdminUser.fromJson(e.cast<String, dynamic>()))
+            .toList();
       }
-      throw Exception('Unexpected response format for users list.');
+      throw Exception('Unexpected response format for members list.');
     }
 
     throw Exception(
-      _extractMessage(body) ?? 'Failed to load users (${res.statusCode}).',
+      _extractMessage(body) ?? 'Failed to load members (${res.statusCode}).',
     );
   }
 
-  Future<AdminUser> fetchUserDetail(int id) async {
+  Future<AdminUser> fetchMemberDetail(int id) async {
     final uri = Uri.parse('$_baseUrl/api/admin/users/$id');
 
     final res = await http.get(uri, headers: _headers()).timeout(_timeout);
@@ -105,163 +219,41 @@ class AdminService {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (body is Map<String, dynamic>) return AdminUser.fromJson(body);
       if (body is Map) return AdminUser.fromJson(body.cast<String, dynamic>());
-      throw Exception('Unexpected response format for user detail.');
+      throw Exception('Unexpected response format for member detail.');
     }
 
     throw Exception(
       _extractMessage(body) ??
-          'Failed to load user detail (${res.statusCode}).',
+          'Failed to load member detail (${res.statusCode}).',
     );
   }
 
-  Future<bool> toggleBlock(int id) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$id/block');
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map) {
-        return (body['is_blocked'] == true) ||
-            (body['is_blocked']?.toString() == '1');
-      }
-      return false;
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to toggle block (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Payments
-  // ---------------------------
-  Future<void> addPayment({
-    required int userId,
-    required double amount,
-    required String reference,
+  Future<void> sendGeneralPush({
+    required String title,
+    required String body,
   }) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/payments');
+    final uri = Uri.parse('$_baseUrl/api/admin/push/send');
 
-    final res = await http
-        .post(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode({'amount': amount, 'reference': reference.trim()}),
-        )
-        .timeout(_timeout);
-
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to add payment (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Admin Tools
-  // ---------------------------
-  Future<AdminUser> createUser(Map<String, dynamic> payload) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users');
+    final payload = <String, dynamic>{
+      'target_type': 'topic',
+      'target': 'wh_general',
+      'title': title.trim(),
+      'body': body.trim(),
+      'payload': {'type': 'general', 'source': 'members_admin'},
+    };
 
     final res = await http
         .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
         .timeout(_timeout);
 
-    final body = _safeJson(res.body);
-
-    if (res.statusCode == 201 ||
-        (res.statusCode >= 200 && res.statusCode < 300)) {
-      final u = (body is Map ? body['user'] : null);
-      if (u is Map<String, dynamic>) return AdminUser.fromJson(u);
-      throw Exception('User created, but response user payload missing.');
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to create user (${res.statusCode}).',
-    );
-  }
-
-  Future<AdminUser> updateUser(int id, Map<String, dynamic> payload) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$id');
-
-    final res = await http
-        .patch(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode(payload),
-        )
-        .timeout(_timeout);
-
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final u = (body is Map ? body['user'] : null);
-      if (u is Map<String, dynamic>) return AdminUser.fromJson(u);
-
-      if (body is Map && body.containsKey('id')) {
-        return AdminUser.fromJson(body.cast<String, dynamic>());
-      }
-
-      throw Exception('User updated, but response payload unexpected.');
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to update user (${res.statusCode}).',
-    );
-  }
-
-  Future<void> setPassword(int id, String newPassword) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$id/password');
-
-    final res = await http
-        .post(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode({'password': newPassword}),
-        )
-        .timeout(_timeout);
-
-    final body = _safeJson(res.body);
-
+    final resBody = _safeJson(res.body);
     if (res.statusCode >= 200 && res.statusCode < 300) return;
 
     throw Exception(
-      _extractMessage(body) ?? 'Failed to set password (${res.statusCode}).',
+      _extractMessage(resBody) ?? 'Failed to send push (${res.statusCode}).',
     );
   }
 
-  Future<void> revokeTokens(int id) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$id/revoke-tokens');
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to revoke tokens (${res.statusCode}).',
-    );
-  }
-
-  Future<void> deleteUser(int id) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$id');
-
-    final res = await http.delete(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to delete user (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Ads
-  // ---------------------------
   Future<List<AdminAd>> fetchAds() async {
     final uri = Uri.parse('$_baseUrl/api/admin/ads');
 
@@ -271,7 +263,8 @@ class AdminService {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       if (body is List) {
         return body
-            .map((e) => AdminAd.fromJson((e as Map).cast<String, dynamic>()))
+            .whereType<Map>()
+            .map((e) => AdminAd.fromJson(e.cast<String, dynamic>()))
             .toList();
       }
       throw Exception('Unexpected response format for ads list.');
@@ -282,10 +275,6 @@ class AdminService {
     );
   }
 
-  /// ✅ Aligned with your Dashboard UI:
-  /// - imageBytes/imageName = FULL (required)
-  /// - thumbBytes/thumbName = THUMB (required)
-  /// - weight optional
   Future<AdminAd> uploadAd({
     required String title,
     String? message,
@@ -294,45 +283,36 @@ class AdminService {
     int? weight,
     String? startsAtIso,
     String? endsAtIso,
-    required Uint8List imageBytes, // FULL
+    required Uint8List imageBytes,
     required String imageName,
-    required Uint8List thumbBytes, // THUMB
+    required Uint8List thumbBytes,
     required String thumbName,
   }) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/ads');
-
     final t = (_token ?? '').trim();
     if (t.isEmpty) throw Exception('No admin token set. Please login again.');
 
-    if (imageBytes.isEmpty) {
-      throw Exception('Full image file is empty.');
-    }
-    if (thumbBytes.isEmpty) {
-      throw Exception('Thumb image file is empty.');
-    }
+    if (imageBytes.isEmpty) throw Exception('Full image file is empty.');
+    if (thumbBytes.isEmpty) throw Exception('Thumb image file is empty.');
 
+    final uri = Uri.parse('$_baseUrl/api/admin/ads');
     final req = http.MultipartRequest('POST', uri);
+
     req.headers['Accept'] = 'application/json';
     req.headers['Authorization'] = 'Bearer $t';
 
     req.fields['title'] = title.trim();
-    if ((message ?? '').trim().isNotEmpty) {
+    if ((message ?? '').trim().isNotEmpty)
       req.fields['message'] = message!.trim();
-    }
-    if ((linkUrl ?? '').trim().isNotEmpty) {
+    if ((linkUrl ?? '').trim().isNotEmpty)
       req.fields['link_url'] = linkUrl!.trim();
-    }
     req.fields['active'] = active ? '1' : '0';
 
     if (weight != null) req.fields['weight'] = '$weight';
-    if ((startsAtIso ?? '').trim().isNotEmpty) {
+    if ((startsAtIso ?? '').trim().isNotEmpty)
       req.fields['starts_at'] = startsAtIso!.trim();
-    }
-    if ((endsAtIso ?? '').trim().isNotEmpty) {
+    if ((endsAtIso ?? '').trim().isNotEmpty)
       req.fields['ends_at'] = endsAtIso!.trim();
-    }
 
-    // Field names must match Laravel: 'image' and 'thumb'
     req.files.add(
       http.MultipartFile.fromBytes('image', imageBytes, filename: imageName),
     );
@@ -372,580 +352,137 @@ class AdminService {
     );
   }
 
-  // ---------------------------
-  // System (Control Center)
-  // ---------------------------
-  Future<SystemHealth> fetchSystemHealth() async {
-    final uri = Uri.parse('$_baseUrl/api/admin/system/health');
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map<String, dynamic>) return SystemHealth.fromJson(body);
-      if (body is Map) {
-        return SystemHealth.fromJson(body.cast<String, dynamic>());
-      }
-      throw Exception('Unexpected response format for system health.');
-    }
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to load system health (${res.statusCode}).',
-    );
-  }
-
-  Future<SystemUsage> fetchSystemUsage() async {
-    final uri = Uri.parse('$_baseUrl/api/admin/system/usage');
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map<String, dynamic>) return SystemUsage.fromJson(body);
-      if (body is Map) {
-        return SystemUsage.fromJson(body.cast<String, dynamic>());
-      }
-      throw Exception('Unexpected response format for system usage.');
-    }
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to load system usage (${res.statusCode}).',
-    );
-  }
-
-  Future<SystemVisits> fetchSystemVisits() async {
-    final uri = Uri.parse('$_baseUrl/api/admin/system/visits');
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map<String, dynamic>) return SystemVisits.fromJson(body);
-      if (body is Map) {
-        return SystemVisits.fromJson(body.cast<String, dynamic>());
-      }
-      throw Exception('Unexpected response format for system visits.');
-    }
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to load visit stats (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Audit Logs (Admin)
-  // ---------------------------
-  Future<List<AdminAuditLog>> fetchAuditLogs({
-    String? action,
-    int? userId,
-    DateTime? from,
-    DateTime? to,
+  Future<List<AdminInvite>> fetchInvites({
+    String status = 'all',
     int limit = 200,
   }) async {
-    final params = <String, String>{};
-    if ((action ?? '').trim().isNotEmpty) params['action'] = action!.trim();
-    if (userId != null) params['user_id'] = '$userId';
-    if (from != null) params['from'] = from.toIso8601String();
-    if (to != null) params['to'] = to.toIso8601String();
-    if (limit > 0) params['limit'] = '$limit';
+    final params = <String, String>{'status': status, 'limit': '$limit'};
 
     final uri = Uri.parse(
-      '$_baseUrl/api/admin/audit-logs',
-    ).replace(queryParameters: params.isEmpty ? null : params);
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final listRaw = (body is Map ? body['logs'] : null);
-      if (listRaw is List) {
-        return listRaw
-            .whereType<Map>()
-            .map((e) => AdminAuditLog.fromJson(e.cast<String, dynamic>()))
-            .toList();
-      }
-      return [];
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to load audit logs (${res.statusCode}).',
-    );
-  }
-
-  Future<int?> clearAuditLogs() async {
-    final uri = Uri.parse('$_baseUrl/api/admin/audit-logs');
-
-    final res = await http.delete(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map && body['deleted'] != null) {
-        return int.tryParse(body['deleted'].toString());
-      }
-      return null;
-    }
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to clear audit logs (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Error Logs (Admin)
-  // ---------------------------
-  Future<AdminErrorLogResponse> fetchErrorLogs({
-    String? level,
-    String? url,
-    String? exceptionClass,
-    String? appType,
-    String? method,
-    String? ip,
-    String? requestId,
-    int? userId,
-    int? sinceId,
-    DateTime? from,
-    DateTime? to,
-    int limit = 200,
-  }) async {
-    final params = <String, String>{};
-    if ((level ?? '').trim().isNotEmpty) params['level'] = level!.trim();
-    if ((url ?? '').trim().isNotEmpty) params['url'] = url!.trim();
-    if ((exceptionClass ?? '').trim().isNotEmpty) {
-      params['exception_class'] = exceptionClass!.trim();
-    }
-    if ((appType ?? '').trim().isNotEmpty) params['app_type'] = appType!.trim();
-    if ((method ?? '').trim().isNotEmpty) params['method'] = method!.trim();
-    if ((ip ?? '').trim().isNotEmpty) params['ip'] = ip!.trim();
-    if ((requestId ?? '').trim().isNotEmpty) {
-      params['request_id'] = requestId!.trim();
-    }
-    if (userId != null) params['user_id'] = '$userId';
-    if (sinceId != null) params['since_id'] = '$sinceId';
-    if (from != null) params['from'] = from.toIso8601String();
-    if (to != null) params['to'] = to.toIso8601String();
-    if (limit > 0) params['limit'] = '$limit';
-
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/error-logs',
-    ).replace(queryParameters: params.isEmpty ? null : params);
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map<String, dynamic>) {
-        return AdminErrorLogResponse.fromJson(body);
-      }
-      if (body is Map) {
-        return AdminErrorLogResponse.fromJson(body.cast<String, dynamic>());
-      }
-      return const AdminErrorLogResponse(logs: []);
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to load error logs (${res.statusCode}).',
-    );
-  }
-
-  Future<int?> clearErrorLogs() async {
-    final uri = Uri.parse('$_baseUrl/api/admin/error-logs');
-
-    final res = await http.delete(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      if (body is Map && body['deleted'] != null) {
-        return int.tryParse(body['deleted'].toString());
-      }
-      return null;
-    }
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to clear error logs (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Sessions / Licenses (Admin)
-  // ---------------------------
-  Future<List<AdminSession>> fetchUserSessions(int userId) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/sessions');
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final listRaw = (body is Map ? body['sessions'] : null);
-      if (listRaw is List) {
-        return listRaw
-            .whereType<Map>()
-            .map((e) => AdminSession.fromJson(e.cast<String, dynamic>()))
-            .toList();
-      }
-      return [];
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to load sessions (${res.statusCode}).',
-    );
-  }
-
-  Future<void> logoutUserByType(int userId, String appType) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/logout-by-type');
-
-    final res = await http
-        .post(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode({'app_type': appType}),
-        )
-        .timeout(_timeout);
-
-    final body = _safeJson(res.body);
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to revoke app sessions (${res.statusCode}).',
-    );
-  }
-
-  Future<void> logoutUserByToken(int userId, int tokenId) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/logout-by-token');
-
-    final res = await http
-        .post(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode({'token_id': tokenId}),
-        )
-        .timeout(_timeout);
-
-    final body = _safeJson(res.body);
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to revoke session (${res.statusCode}).',
-    );
-  }
-
-  Future<void> logoutUserAll(int userId) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/logout-all');
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to revoke all sessions (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Alerts / Notices (Admin)
-  // ---------------------------
-  Future<List<AdminNotice>> fetchNotices({
-    bool unreadOnly = false,
-    int limit = 100,
-  }) async {
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/notices?limit=$limit&unread=${unreadOnly ? '1' : '0'}',
-    );
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final listRaw = (body is Map ? body['notices'] : null);
-      if (listRaw is List) {
-        return listRaw
-            .whereType<Map>()
-            .map((e) => AdminNotice.fromJson(e.cast<String, dynamic>()))
-            .toList();
-      }
-      if (body is List) {
-        return body
-            .whereType<Map>()
-            .map((e) => AdminNotice.fromJson(e.cast<String, dynamic>()))
-            .toList();
-      }
-      return [];
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to load notices (${res.statusCode}).',
-    );
-  }
-
-  Future<void> markNoticeRead(int id) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/notices/$id/read');
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to mark notice read (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Push Notifications
-  // ---------------------------
-  Future<void> sendGeneralPush({
-    required String title,
-    required String body,
-  }) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/push/send');
-    final payload = <String, dynamic>{
-      'target_type': 'topic',
-      'target': 'wh_general',
-      'title': title.trim(),
-      'body': body,
-      'payload': {'type': 'general'},
-    };
-
-    final res = await http
-        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
-        .timeout(_timeout);
-
-    final resBody = _safeJson(res.body);
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(resBody) ?? 'Failed to send push (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Approvals (Profile changes)
-  // ---------------------------
-  Future<List<ProfileChangeRequest>> fetchProfileChangeRequests({
-    String status = 'pending',
-    int limit = 100,
-  }) async {
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/profile-change-requests?status=$status&limit=$limit',
-    );
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final listRaw = (body is Map ? body['requests'] : null);
-      if (listRaw is List) {
-        return listRaw
-            .whereType<Map>()
-            .map(
-              (e) => ProfileChangeRequest.fromJson(e.cast<String, dynamic>()),
-            )
-            .toList();
-      }
-      return [];
-    }
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to load change requests (${res.statusCode}).',
-    );
-  }
-
-  Future<void> approveProfileChangeRequest(int id, {String? note}) async {
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/profile-change-requests/$id/approve',
-    );
-
-    final res = await http
-        .post(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode({'note': (note ?? '').trim()}),
-        )
-        .timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to approve request (${res.statusCode}).',
-    );
-  }
-
-  Future<void> rejectProfileChangeRequest(int id, {String? note}) async {
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/profile-change-requests/$id/reject',
-    );
-
-    final res = await http
-        .post(
-          uri,
-          headers: _headers(jsonBody: true),
-          body: jsonEncode({'note': (note ?? '').trim()}),
-        )
-        .timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to reject request (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Security verification link (Admin tool)
-  // ---------------------------
-  Future<void> sendSecurityVerificationLink(int userId) async {
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/users/$userId/security-verification-link',
-    );
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to send security verification link (${res.statusCode}).',
-    );
-  }
-
-  Future<void> sendTemporaryPassword(int userId) async {
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/users/$userId/temporary-password',
-    );
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to send temporary password (${res.statusCode}).',
-    );
-  }
-
-  // ---------------------------
-  // Email logs (Welcome / Signup)
-  // ---------------------------
-  Future<int?> fetchLatestEmailLogId({
-    required String type,
-    required String email,
-  }) async {
-    final params = <String, String>{
-      'type': type.trim(),
-      'email': email.trim(),
-      'limit': '1',
-    };
-
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/email-logs',
+      '$_baseUrl/api/admin/invites',
     ).replace(queryParameters: params);
 
     final res = await http.get(uri, headers: _headers()).timeout(_timeout);
     final body = _safeJson(res.body);
 
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      final listRaw = (body is Map ? body['email_logs'] : null);
-      if (listRaw is List && listRaw.isNotEmpty) {
-        final first = listRaw.first;
-        if (first is Map && first['id'] != null) {
-          return int.tryParse(first['id'].toString());
-        }
-      }
-      return null;
-    }
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to load email logs (${res.statusCode}).',
-    );
-  }
-
-  Future<void> resendEmailLog(int emailLogId, {String? email}) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/email-logs/$emailLogId/resend');
-
-    final payload = <String, dynamic>{};
-    if ((email ?? '').trim().isNotEmpty) payload['email'] = email!.trim();
-
-    final res = await http
-        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
-        .timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ?? 'Failed to resend email (${res.statusCode}).',
-    );
-  }
-
-  Future<void> generateWelcomeEmail(int userId) async {
-    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/welcome-email');
-
-    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
-
-    throw Exception(
-      _extractMessage(body) ??
-          'Failed to generate welcome email (${res.statusCode}).',
-    );
-  }
-
-  Future<List<EmailLog>> fetchEmailLogs({
-    String? email,
-    String? type,
-    int limit = 50,
-  }) async {
-    final params = <String, String>{};
-    if ((email ?? '').trim().isNotEmpty) params['email'] = email!.trim();
-    if ((type ?? '').trim().isNotEmpty) params['type'] = type!.trim();
-    if (limit > 0) params['limit'] = '$limit';
-
-    final uri = Uri.parse(
-      '$_baseUrl/api/admin/email-logs',
-    ).replace(queryParameters: params.isEmpty ? null : params);
-
-    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
-    final body = _safeJson(res.body);
-
-    if (res.statusCode >= 200 && res.statusCode < 300) {
-      final listRaw = (body is Map ? body['email_logs'] : null);
+      final listRaw = (body is Map ? body['invites'] : null);
       if (listRaw is List) {
         return listRaw
             .whereType<Map>()
-            .map((e) => EmailLog.fromJson(e.cast<String, dynamic>()))
+            .map((e) => AdminInvite.fromJson(e.cast<String, dynamic>()))
             .toList();
       }
       return [];
     }
 
     throw Exception(
-      _extractMessage(body) ?? 'Failed to load email logs (${res.statusCode}).',
+      _extractMessage(body) ?? 'Failed to load invites (${res.statusCode}).',
     );
   }
 
-  // ---------------------------
-  // Helpers
-  // ---------------------------
+  Future<AdminInvite> createInvite({
+    required String name,
+    required String surname,
+    required String email,
+    required String whatsappPhone,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/invites');
+
+    final res = await http
+        .post(
+          uri,
+          headers: _headers(jsonBody: true),
+          body: jsonEncode({
+            'name': name.trim(),
+            'surname': surname.trim(),
+            'email': email.trim().toLowerCase(),
+            'whatsapp_phone': whatsappPhone.trim(),
+          }),
+        )
+        .timeout(_timeout);
+
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map && body['invite'] is Map) {
+        return AdminInvite.fromJson(
+          (body['invite'] as Map).cast<String, dynamic>(),
+        );
+      }
+      throw Exception('Invite created but response payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to create invite (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminInvite> resendInvite(int inviteId) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/invites/$inviteId/resend');
+
+    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map && body['invite'] is Map) {
+        return AdminInvite.fromJson(
+          (body['invite'] as Map).cast<String, dynamic>(),
+        );
+      }
+      throw Exception('Resend succeeded but invite payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to resend invite (${res.statusCode}).',
+    );
+  }
+
+  Future<List<AdminInvoice>> fetchInvoices({
+    int? userId,
+    String status = 'all',
+    int limit = 200,
+  }) async {
+    final params = <String, String>{'status': status, 'limit': '$limit'};
+    if (userId != null && userId > 0) params['user_id'] = '$userId';
+
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/invoices',
+    ).replace(queryParameters: params);
+
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final listRaw = (body is Map ? body['invoices'] : null);
+      if (listRaw is List) {
+        return listRaw
+            .whereType<Map>()
+            .map((e) => AdminInvoice.fromJson(e.cast<String, dynamic>()))
+            .toList();
+      }
+      return [];
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to load invoices (${res.statusCode}).',
+    );
+  }
+
   dynamic _safeJson(String raw) {
-    if (raw.trim().isEmpty) return {};
+    if (raw.trim().isEmpty) return <String, dynamic>{};
     try {
       return jsonDecode(raw);
     } catch (_) {
       return {'message': raw};
     }
+  }
+
+  String _tokenFromBody(dynamic body) {
+    if (body is Map) {
+      return (body['token'] ?? '').toString().trim();
+    }
+    return '';
   }
 
   String? _extractMessage(dynamic body) {
