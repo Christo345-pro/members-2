@@ -101,6 +101,7 @@ class AdminUser {
 
   /// Payments list (used by Dashboard UI).
   final List<UserPayment> payments;
+  final List<AdminLicense> licenses;
 
   const AdminUser({
     required this.id,
@@ -129,6 +130,7 @@ class AdminUser {
     this.createdAt,
     this.loginLogs = const [],
     this.payments = const [],
+    this.licenses = const [],
   });
 
   /// Backwards compatibility: older code might still use `logs`.
@@ -140,6 +142,7 @@ class AdminUser {
             as List;
     final paysRaw =
         (json['payments'] ?? json['user_payments'] ?? const []) as List;
+    final licensesRaw = (json['licenses'] ?? const []) as List;
 
     return AdminUser(
       id: _parseInt(json['id']),
@@ -191,6 +194,10 @@ class AdminUser {
       payments: paysRaw
           .whereType<Map>()
           .map((e) => UserPayment.fromJson(e.cast<String, dynamic>()))
+          .toList(),
+      licenses: licensesRaw
+          .whereType<Map>()
+          .map((e) => AdminLicense.fromJson(e.cast<String, dynamic>()))
           .toList(),
     );
   }
@@ -247,6 +254,127 @@ class AdminAd {
       weight: j['weight'] == null ? null : _parseInt(j['weight'], fallback: 0),
       startsAt: _parseDate(j['starts_at'] ?? j['startsAt']),
       endsAt: _parseDate(j['ends_at'] ?? j['endsAt']),
+      createdAt: _parseDate(j['created_at'] ?? j['createdAt']),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// Invite Email
+// -----------------------------------------------------------------------------
+class AdminInvite {
+  final int id;
+  final String name;
+  final String surname;
+  final String email;
+  final String? whatsappPhone;
+  final String status;
+  final String? registerLink;
+  final DateTime? expiresAt;
+  final DateTime? openedAt;
+  final DateTime? usedAt;
+  final DateTime? createdAt;
+
+  const AdminInvite({
+    required this.id,
+    required this.name,
+    required this.surname,
+    required this.email,
+    this.whatsappPhone,
+    required this.status,
+    this.registerLink,
+    this.expiresAt,
+    this.openedAt,
+    this.usedAt,
+    this.createdAt,
+  });
+
+  factory AdminInvite.fromJson(Map<String, dynamic> j) => AdminInvite(
+    id: _parseInt(j['id']),
+    name: (j['name'] ?? '').toString(),
+    surname: (j['surname'] ?? '').toString(),
+    email: (j['email'] ?? '').toString(),
+    whatsappPhone: _readString(
+      j['whatsapp_phone'] ?? j['whatsappPhone'] ?? j['cellphone'],
+    ),
+    status: (j['status'] ?? 'active').toString(),
+    registerLink: _readString(j['register_link'] ?? j['registerLink']),
+    expiresAt: _parseDate(j['expires_at'] ?? j['expiresAt']),
+    openedAt: _parseDate(j['opened_at'] ?? j['openedAt']),
+    usedAt: _parseDate(j['used_at'] ?? j['usedAt']),
+    createdAt: _parseDate(j['created_at'] ?? j['createdAt']),
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Invoice
+// -----------------------------------------------------------------------------
+class AdminInvoice {
+  final int id;
+  final String invoiceNumber;
+  final String token;
+  final String status;
+  final String currency;
+  final double totalAmount;
+  final String? providerKey;
+  final String? providerReference;
+  final String? checkoutUrl;
+  final int userId;
+  final String username;
+  final String email;
+  final String? accountNumber;
+  final DateTime? paidAt;
+  final DateTime? completedAt;
+  final DateTime? createdAt;
+
+  const AdminInvoice({
+    required this.id,
+    required this.invoiceNumber,
+    required this.token,
+    required this.status,
+    required this.currency,
+    required this.totalAmount,
+    this.providerKey,
+    this.providerReference,
+    this.checkoutUrl,
+    required this.userId,
+    required this.username,
+    required this.email,
+    this.accountNumber,
+    this.paidAt,
+    this.completedAt,
+    this.createdAt,
+  });
+
+  factory AdminInvoice.fromJson(Map<String, dynamic> j) {
+    final user = j['user'];
+    final userMap = user is Map ? user.cast<String, dynamic>() : const {};
+    return AdminInvoice(
+      id: _parseInt(j['id']),
+      invoiceNumber:
+          (j['invoice_number'] ?? j['invoiceNumber'] ?? '').toString(),
+      token: (j['token'] ?? '').toString(),
+      status: (j['status'] ?? '').toString(),
+      currency: (j['currency'] ?? 'ZAR').toString(),
+      totalAmount: _parseDouble(j['total_amount'] ?? j['amount']) ?? 0.0,
+      providerKey: _readString(j['provider_key'] ?? j['providerKey']),
+      providerReference: _readString(
+        j['provider_reference'] ?? j['providerReference'],
+      ),
+      checkoutUrl: _readString(j['checkout_url'] ?? j['checkoutUrl']),
+      userId: _parseInt(
+        userMap['id'] ?? j['user_id'] ?? j['userId'],
+        fallback: 0,
+      ),
+      username: (userMap['username'] ?? j['username'] ?? '').toString(),
+      email: (userMap['email'] ?? j['email'] ?? '').toString(),
+      accountNumber: _readString(
+        userMap['account_number'] ?? userMap['accountNumber'] ??
+            j['account_number'] ??
+            j['accountNumber'],
+      ),
+      paidAt: _parseDate(j['paid_at'] ?? j['paidAt']),
+      completedAt: _parseDate(j['completed_at'] ?? j['completedAt']),
       createdAt: _parseDate(j['created_at'] ?? j['createdAt']),
     );
   }
@@ -378,6 +506,45 @@ class UserPayment {
       json['payment_date'] ?? json['paymentDate'] ?? json['date'],
     ),
     createdAt: _parseDate(json['created_at'] ?? json['createdAt']),
+  );
+}
+
+// -----------------------------------------------------------------------------
+// Admin License
+// -----------------------------------------------------------------------------
+class AdminLicense {
+  final int id;
+  final String licenseType;
+  final String status;
+  final bool isPaid;
+  final bool isFree;
+  final bool isLocked;
+  final String? licenseKeyHint;
+  final String? deviceLabel;
+  final DateTime? lastUsedAt;
+
+  const AdminLicense({
+    required this.id,
+    required this.licenseType,
+    required this.status,
+    required this.isPaid,
+    required this.isFree,
+    required this.isLocked,
+    this.licenseKeyHint,
+    this.deviceLabel,
+    this.lastUsedAt,
+  });
+
+  factory AdminLicense.fromJson(Map<String, dynamic> j) => AdminLicense(
+    id: _parseInt(j['id']),
+    licenseType: (j['license_type'] ?? j['licenseType'] ?? '').toString(),
+    status: (j['status'] ?? '').toString(),
+    isPaid: _parseBool(j['is_paid'] ?? j['isPaid']),
+    isFree: _parseBool(j['is_free'] ?? j['isFree']),
+    isLocked: _parseBool(j['is_locked'] ?? j['isLocked']),
+    licenseKeyHint: _readString(j['license_key_hint'] ?? j['licenseKeyHint']),
+    deviceLabel: _readString(j['device_label'] ?? j['deviceLabel']),
+    lastUsedAt: _parseDate(j['last_used_at'] ?? j['lastUsedAt']),
   );
 }
 
