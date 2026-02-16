@@ -23,7 +23,10 @@ class AdminOtpChallenge {
 }
 
 class AdminService {
-  static const String _baseUrl = 'https://weather-hooligan.co.za';
+  static const String _baseUrl = String.fromEnvironment(
+    'ADMIN_API_BASE_URL',
+    defaultValue: 'https://devtest.weather-hooligan.co.za',
+  );
   static const Duration _timeout = Duration(seconds: 30);
 
   static String? _token;
