@@ -382,6 +382,209 @@ class AdminInvoice {
 }
 
 // -----------------------------------------------------------------------------
+// WhatsApp Calls (Webhook history + admin status)
+// -----------------------------------------------------------------------------
+class AdminWhatsAppCall {
+  final int id;
+  final String? callId;
+  final String? sessionId;
+  final String? fromNumber;
+  final String? toNumber;
+  final String? direction;
+  final String? eventType;
+  final String? callStatus;
+  final String? contactName;
+  final int? durationSeconds;
+  final DateTime? occurredAt;
+  final DateTime? receivedAt;
+  final String adminStatus;
+  final String? adminNote;
+  final String? adminUpdatedBy;
+  final DateTime? adminUpdatedAt;
+  final DateTime? createdAt;
+  final DateTime? updatedAt;
+  final int? userId;
+  final String? username;
+  final String? userEmail;
+  final String? userWhatsappPhone;
+
+  const AdminWhatsAppCall({
+    required this.id,
+    this.callId,
+    this.sessionId,
+    this.fromNumber,
+    this.toNumber,
+    this.direction,
+    this.eventType,
+    this.callStatus,
+    this.contactName,
+    this.durationSeconds,
+    this.occurredAt,
+    this.receivedAt,
+    required this.adminStatus,
+    this.adminNote,
+    this.adminUpdatedBy,
+    this.adminUpdatedAt,
+    this.createdAt,
+    this.updatedAt,
+    this.userId,
+    this.username,
+    this.userEmail,
+    this.userWhatsappPhone,
+  });
+
+  factory AdminWhatsAppCall.fromJson(Map<String, dynamic> j) {
+    final userRaw = j['user'];
+    final user = userRaw is Map ? userRaw.cast<String, dynamic>() : const {};
+
+    return AdminWhatsAppCall(
+      id: _parseInt(j['id']),
+      callId: _readString(j['call_id'] ?? j['callId']),
+      sessionId: _readString(j['session_id'] ?? j['sessionId']),
+      fromNumber: _readString(j['from_number'] ?? j['fromNumber']),
+      toNumber: _readString(j['to_number'] ?? j['toNumber']),
+      direction: _readString(j['direction']),
+      eventType: _readString(j['event_type'] ?? j['eventType']),
+      callStatus: _readString(j['call_status'] ?? j['callStatus']),
+      contactName: _readString(j['contact_name'] ?? j['contactName']),
+      durationSeconds: j['duration_seconds'] == null
+          ? null
+          : _parseInt(j['duration_seconds'], fallback: 0),
+      occurredAt: _parseDate(j['occurred_at'] ?? j['occurredAt']),
+      receivedAt: _parseDate(j['received_at'] ?? j['receivedAt']),
+      adminStatus: _readString(j['admin_status'] ?? j['adminStatus']) ?? 'open',
+      adminNote: _readString(j['admin_note'] ?? j['adminNote']),
+      adminUpdatedBy: _readString(j['admin_updated_by'] ?? j['adminUpdatedBy']),
+      adminUpdatedAt: _parseDate(j['admin_updated_at'] ?? j['adminUpdatedAt']),
+      createdAt: _parseDate(j['created_at'] ?? j['createdAt']),
+      updatedAt: _parseDate(j['updated_at'] ?? j['updatedAt']),
+      userId: user['id'] == null
+          ? (j['user_id'] == null ? null : _parseInt(j['user_id']))
+          : _parseInt(user['id']),
+      username: _readString(user['username'] ?? j['username']),
+      userEmail: _readString(user['email'] ?? j['email']),
+      userWhatsappPhone: _readString(
+        user['whatsapp_phone'] ?? user['whatsappPhone'] ?? j['whatsapp_phone'],
+      ),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
+// WhatsApp Inbox (Conversations + Messages)
+// -----------------------------------------------------------------------------
+class AdminWaConversation {
+  final int id;
+  final String waUser;
+  final String status;
+  final String? lastMessagePreview;
+  final DateTime? lastMessageAt;
+  final DateTime? lastInboundAt;
+  final bool within24HourWindow;
+  final DateTime? canReplyUntil;
+  final int? userId;
+  final String? username;
+  final String? displayName;
+  final String? email;
+  final String? userWhatsappPhone;
+
+  const AdminWaConversation({
+    required this.id,
+    required this.waUser,
+    required this.status,
+    this.lastMessagePreview,
+    this.lastMessageAt,
+    this.lastInboundAt,
+    required this.within24HourWindow,
+    this.canReplyUntil,
+    this.userId,
+    this.username,
+    this.displayName,
+    this.email,
+    this.userWhatsappPhone,
+  });
+
+  String get title {
+    final full = (displayName ?? '').trim();
+    if (full.isNotEmpty) return full;
+
+    final u = (username ?? '').trim();
+    if (u.isNotEmpty) return u;
+
+    return waUser;
+  }
+
+  factory AdminWaConversation.fromJson(Map<String, dynamic> j) {
+    final userRaw = j['user'];
+    final user = userRaw is Map ? userRaw.cast<String, dynamic>() : const {};
+
+    return AdminWaConversation(
+      id: _parseInt(j['id']),
+      waUser: (j['wa_user'] ?? j['waUser'] ?? '').toString(),
+      status: _readString(j['status']) ?? 'open',
+      lastMessagePreview: _readString(
+        j['last_message_preview'] ?? j['lastMessagePreview'],
+      ),
+      lastMessageAt: _parseDate(j['last_message_at'] ?? j['lastMessageAt']),
+      lastInboundAt: _parseDate(j['last_inbound_at'] ?? j['lastInboundAt']),
+      within24HourWindow: _parseBool(
+        j['within_24h_window'] ?? j['within24hWindow'],
+      ),
+      canReplyUntil: _parseDate(j['can_reply_until'] ?? j['canReplyUntil']),
+      userId: user['id'] == null ? null : _parseInt(user['id'], fallback: 0),
+      username: _readString(user['username']),
+      displayName: _readString(
+        user['display_name'] ?? user['displayName'] ?? user['name'],
+      ),
+      email: _readString(user['email']),
+      userWhatsappPhone: _readString(
+        user['whatsapp_phone'] ?? user['whatsappPhone'],
+      ),
+    );
+  }
+}
+
+class AdminWaMessage {
+  final int id;
+  final int? conversationId;
+  final String direction;
+  final String type;
+  final String? body;
+  final DateTime? timestamp;
+  final String? waMessageId;
+  final String? deliveryStatus;
+
+  const AdminWaMessage({
+    required this.id,
+    this.conversationId,
+    required this.direction,
+    required this.type,
+    this.body,
+    this.timestamp,
+    this.waMessageId,
+    this.deliveryStatus,
+  });
+
+  bool get isInbound => direction.trim().toLowerCase() == 'in';
+  bool get isOutbound => direction.trim().toLowerCase() == 'out';
+
+  factory AdminWaMessage.fromJson(Map<String, dynamic> j) {
+    return AdminWaMessage(
+      id: _parseInt(j['id']),
+      conversationId: j['conversation_id'] == null
+          ? null
+          : _parseInt(j['conversation_id'], fallback: 0),
+      direction: _readString(j['direction']) ?? 'in',
+      type: _readString(j['type']) ?? 'text',
+      body: _readString(j['body']),
+      timestamp: _parseDate(j['timestamp']),
+      waMessageId: _readString(j['wa_message_id'] ?? j['waMessageId']),
+      deliveryStatus: _readString(j['delivery_status'] ?? j['deliveryStatus']),
+    );
+  }
+}
+
+// -----------------------------------------------------------------------------
 // Email Logs (Welcome / Signup)
 // -----------------------------------------------------------------------------
 class EmailLog {

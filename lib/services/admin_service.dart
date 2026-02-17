@@ -304,17 +304,21 @@ class AdminService {
     req.headers['Authorization'] = 'Bearer $t';
 
     req.fields['title'] = title.trim();
-    if ((message ?? '').trim().isNotEmpty)
+    if ((message ?? '').trim().isNotEmpty) {
       req.fields['message'] = message!.trim();
-    if ((linkUrl ?? '').trim().isNotEmpty)
+    }
+    if ((linkUrl ?? '').trim().isNotEmpty) {
       req.fields['link_url'] = linkUrl!.trim();
+    }
     req.fields['active'] = active ? '1' : '0';
 
     if (weight != null) req.fields['weight'] = '$weight';
-    if ((startsAtIso ?? '').trim().isNotEmpty)
+    if ((startsAtIso ?? '').trim().isNotEmpty) {
       req.fields['starts_at'] = startsAtIso!.trim();
-    if ((endsAtIso ?? '').trim().isNotEmpty)
+    }
+    if ((endsAtIso ?? '').trim().isNotEmpty) {
       req.fields['ends_at'] = endsAtIso!.trim();
+    }
 
     req.files.add(
       http.MultipartFile.fromBytes('image', imageBytes, filename: imageName),
@@ -469,6 +473,170 @@ class AdminService {
 
     throw Exception(
       _extractMessage(body) ?? 'Failed to load invoices (${res.statusCode}).',
+    );
+  }
+
+  Future<List<AdminWhatsAppCall>> fetchWhatsAppCalls({
+    String adminStatus = 'all',
+    String callStatus = 'all',
+    String direction = 'all',
+    String? query,
+    int limit = 200,
+  }) async {
+    final params = <String, String>{
+      'admin_status': adminStatus,
+      'call_status': callStatus,
+      'direction': direction,
+      'limit': '$limit',
+    };
+    if ((query ?? '').trim().isNotEmpty) params['q'] = query!.trim();
+
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/whatsapp/calls',
+    ).replace(queryParameters: params);
+
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final listRaw = (body is Map ? body['calls'] : null);
+      if (listRaw is List) {
+        return listRaw
+            .whereType<Map>()
+            .map((e) => AdminWhatsAppCall.fromJson(e.cast<String, dynamic>()))
+            .toList();
+      }
+      return [];
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to load WhatsApp calls (${res.statusCode}).',
+    );
+  }
+
+  Future<List<AdminWaConversation>> fetchWaConversations({
+    String? query,
+    String status = 'all',
+    int limit = 200,
+  }) async {
+    final params = <String, String>{'status': status, 'limit': '$limit'};
+    if ((query ?? '').trim().isNotEmpty) params['q'] = query!.trim();
+
+    final uri = Uri.parse(
+      '$_baseUrl/api/wa/conversations',
+    ).replace(queryParameters: params);
+
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final listRaw = body is Map ? body['conversations'] : null;
+      if (listRaw is List) {
+        return listRaw
+            .whereType<Map>()
+            .map((e) => AdminWaConversation.fromJson(e.cast<String, dynamic>()))
+            .toList();
+      }
+      return [];
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to load WhatsApp conversations (${res.statusCode}).',
+    );
+  }
+
+  Future<List<AdminWaMessage>> fetchWaConversationMessages(
+    int conversationId, {
+    int limit = 500,
+  }) async {
+    final uri = Uri.parse(
+      '$_baseUrl/api/wa/conversations/$conversationId/messages',
+    ).replace(queryParameters: {'limit': '$limit'});
+
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final listRaw = body is Map ? body['messages'] : null;
+      if (listRaw is List) {
+        return listRaw
+            .whereType<Map>()
+            .map((e) => AdminWaMessage.fromJson(e.cast<String, dynamic>()))
+            .toList();
+      }
+      return [];
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to load WhatsApp messages (${res.statusCode}).',
+    );
+  }
+
+  Future<void> sendWaMessage({
+    int? conversationId,
+    String? waUser,
+    required String body,
+  }) async {
+    final cleanBody = body.trim();
+    if (cleanBody.isEmpty) {
+      throw Exception('Message body is required.');
+    }
+    if ((conversationId ?? 0) <= 0 && (waUser ?? '').trim().isEmpty) {
+      throw Exception('Provide conversationId or waUser.');
+    }
+
+    final payload = <String, dynamic>{
+      'body': cleanBody,
+      if ((conversationId ?? 0) > 0) 'conversation_id': conversationId,
+      if ((waUser ?? '').trim().isNotEmpty) 'wa_user': waUser!.trim(),
+    };
+
+    final uri = Uri.parse('$_baseUrl/api/wa/messages/send');
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final resBody = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) return;
+
+    throw Exception(
+      _extractMessage(resBody) ??
+          'Failed to send WhatsApp message (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminWhatsAppCall> setWhatsAppCallStatus({
+    required int callId,
+    required String adminStatus,
+    String? adminNote,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/whatsapp/calls/$callId/status');
+
+    final payload = <String, dynamic>{
+      'admin_status': adminStatus.trim().toLowerCase(),
+      if (adminNote != null) 'admin_note': adminNote.trim(),
+    };
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map && body['call'] is Map) {
+        return AdminWhatsAppCall.fromJson(
+          (body['call'] as Map).cast<String, dynamic>(),
+        );
+      }
+      throw Exception('Call status updated but payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to update call status (${res.statusCode}).',
     );
   }
 
