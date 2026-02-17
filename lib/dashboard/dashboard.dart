@@ -5,6 +5,7 @@ import 'package:url_launcher/url_launcher.dart';
 import '../auth/login_screen.dart';
 import '../models/admin_models.dart';
 import '../platform/platform_features.dart';
+import '../screens/whatsapp_messages_panel.dart';
 import '../services/admin_service.dart';
 
 class AdminDashboard extends StatefulWidget {
@@ -16,6 +17,28 @@ class AdminDashboard extends StatefulWidget {
 
 class _AdminDashboardState extends State<AdminDashboard> {
   final _service = AdminService();
+  final _waInboxKey = GlobalKey<WhatsAppMessagesPanelState>();
+
+  static const String _whatsAppDefaultCountryCode = String.fromEnvironment(
+    'MEMBERS_WHATSAPP_DEFAULT_COUNTRY_CODE',
+    defaultValue: '27',
+  );
+  static const String _whatsAppMessageTemplate = String.fromEnvironment(
+    'MEMBERS_WHATSAPP_MESSAGE_TEMPLATE',
+    defaultValue: 'Hello {name}, this is Weather Hooligan support.',
+  );
+  static const String _whatsAppMessageDefault = String.fromEnvironment(
+    'MEMBERS_WHATSAPP_MESSAGE_DEFAULT',
+    defaultValue: 'Hello from Weather Hooligan support.',
+  );
+  static const String _whatsAppSchemeBase = String.fromEnvironment(
+    'MEMBERS_WHATSAPP_SCHEME_BASE',
+    defaultValue: 'whatsapp://send',
+  );
+  static const String _whatsAppWebBase = String.fromEnvironment(
+    'MEMBERS_WHATSAPP_WEB_BASE',
+    defaultValue: 'https://wa.me',
+  );
 
   int _tab = 0;
 
@@ -51,6 +74,15 @@ class _AdminDashboardState extends State<AdminDashboard> {
   String _invoiceStatus = 'all';
   bool _invoiceSelectedMemberOnly = false;
 
+  bool _callsLoading = false;
+  String? _callsError;
+  List<AdminWhatsAppCall> _calls = [];
+  String _callsAdminStatus = 'all';
+  String _callsDirection = 'all';
+  String _callsEventStatus = 'all';
+  int? _updatingCallId;
+  final _callsSearchCtrl = TextEditingController();
+
   @override
   void initState() {
     super.initState();
@@ -66,6 +98,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _inviteSurnameCtrl.dispose();
     _inviteEmailCtrl.dispose();
     _inviteWhatsappCtrl.dispose();
+    _callsSearchCtrl.dispose();
 
     super.dispose();
   }
@@ -112,6 +145,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
         break;
       case 4:
         await _loadInvoices();
+        break;
+      case 5:
+        await _waInboxKey.currentState?.refreshAll();
+        break;
+      case 6:
+        await _loadWhatsAppCalls();
         break;
     }
   }
@@ -539,6 +578,60 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  Future<void> _loadWhatsAppCalls() async {
+    if (_callsLoading) return;
+
+    setState(() {
+      _callsLoading = true;
+      _callsError = null;
+    });
+
+    try {
+      final rows = await _service.fetchWhatsAppCalls(
+        adminStatus: _callsAdminStatus,
+        callStatus: _callsEventStatus,
+        direction: _callsDirection,
+        query: _callsSearchCtrl.text.trim(),
+        limit: 300,
+      );
+
+      if (!mounted) return;
+      setState(() => _calls = rows);
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _callsError = e.toString());
+    } finally {
+      if (mounted) setState(() => _callsLoading = false);
+    }
+  }
+
+  Future<void> _setWhatsAppCallStatus(
+    AdminWhatsAppCall call,
+    String nextStatus,
+  ) async {
+    if (_updatingCallId != null) return;
+
+    setState(() => _updatingCallId = call.id);
+    try {
+      final updated = await _service.setWhatsAppCallStatus(
+        callId: call.id,
+        adminStatus: nextStatus,
+      );
+
+      if (!mounted) return;
+      setState(() {
+        _calls = _calls
+            .map((row) => row.id == updated.id ? updated : row)
+            .toList();
+      });
+      _toast('Call status updated.');
+    } catch (e) {
+      _toast('Update failed: $e');
+    } finally {
+      if (mounted) setState(() => _updatingCallId = null);
+    }
+  }
+
   Future<void> _openExternal(String url) async {
     final uri = Uri.tryParse(url);
     if (uri == null) {
@@ -549,6 +642,107 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final ok = await launchUrl(uri, mode: LaunchMode.externalApplication);
     if (!ok) {
       _toast('Could not open URL.');
+    }
+  }
+
+  String? _normalizeWhatsappDigits(String? raw) {
+    final input = (raw ?? '').trim();
+    if (input.isEmpty) return null;
+
+    var digits = input.replaceAll(RegExp(r'\D+'), '');
+    if (digits.isEmpty) return null;
+
+    if (digits.startsWith('00') && digits.length > 2) {
+      digits = digits.substring(2);
+    }
+
+    // Project default is South African numbering; convert local 0XXXXXXXXX.
+    if (digits.startsWith('0') && digits.length == 10) {
+      final countryCode = _whatsAppDefaultCountryCode.replaceAll(
+        RegExp(r'\D+'),
+        '',
+      );
+      if (countryCode.isNotEmpty) {
+        digits = '$countryCode${digits.substring(1)}';
+      }
+    }
+
+    if (digits.length < 8 || digits.length > 15) {
+      return null;
+    }
+
+    return digits;
+  }
+
+  Future<bool> _tryLaunchUri(Uri uri, {required LaunchMode mode}) async {
+    try {
+      return await launchUrl(uri, mode: mode);
+    } catch (_) {
+      return false;
+    }
+  }
+
+  Future<void> _openWhatsAppChat({
+    required String rawPhone,
+    String? name,
+  }) async {
+    final digits = _normalizeWhatsappDigits(rawPhone);
+    if (digits == null) {
+      _toast('Invalid WhatsApp number.');
+      return;
+    }
+
+    final displayName = (name ?? '').trim();
+    String msg;
+    if (displayName.isEmpty) {
+      msg = _whatsAppMessageDefault.trim();
+      if (msg.isEmpty) {
+        msg = 'Hello from Weather Hooligan support.';
+      }
+    } else {
+      final template = _whatsAppMessageTemplate.trim();
+      msg = template.isEmpty
+          ? 'Hello $displayName, this is Weather Hooligan support.'
+          : template.replaceAll('{name}', displayName);
+    }
+    final encodedMsg = Uri.encodeQueryComponent(msg);
+
+    final schemeBase = _whatsAppSchemeBase.trim().isEmpty
+        ? 'whatsapp://send'
+        : _whatsAppSchemeBase.trim();
+    final webBase = _whatsAppWebBase.trim().isEmpty
+        ? 'https://wa.me'
+        : _whatsAppWebBase.trim().replaceAll(RegExp(r'/$'), '');
+
+    final deepLink = Uri.parse('$schemeBase?phone=$digits&text=$encodedMsg');
+    final webLink = Uri.parse('$webBase/$digits?text=$encodedMsg');
+
+    bool opened;
+    if (isAndroid) {
+      opened = await _tryLaunchUri(
+        deepLink,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        opened = await _tryLaunchUri(
+          webLink,
+          mode: LaunchMode.externalApplication,
+        );
+      }
+    } else if (isWeb) {
+      opened = await _tryLaunchUri(webLink, mode: LaunchMode.platformDefault);
+    } else {
+      opened = await _tryLaunchUri(
+        webLink,
+        mode: LaunchMode.externalApplication,
+      );
+      if (!opened) {
+        opened = await _tryLaunchUri(webLink, mode: LaunchMode.platformDefault);
+      }
+    }
+
+    if (!opened) {
+      _toast('Could not open WhatsApp.');
     }
   }
 
@@ -589,6 +783,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
               if (index == 4 && _invoices.isEmpty) {
                 await _loadInvoices();
               }
+              if (index == 5) {
+                await _waInboxKey.currentState?.refreshAll();
+              }
+              if (index == 6 && _calls.isEmpty) {
+                await _loadWhatsAppCalls();
+              }
             },
             labelType: NavigationRailLabelType.all,
             destinations: const [
@@ -611,6 +811,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
               NavigationRailDestination(
                 icon: Icon(Icons.receipt_long),
                 label: Text('Invoices'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.forum),
+                label: Text('WA Inbox'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.call),
+                label: Text('WA Calls'),
               ),
             ],
           ),
@@ -639,6 +847,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
         return _emailsTab();
       case 4:
         return _invoicesTab();
+      case 5:
+        return _whatsAppInboxTab();
+      case 6:
+        return _whatsAppCallsTab();
       default:
         return _membersTab();
     }
@@ -742,7 +954,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
+  Widget _whatsAppInboxTab() {
+    return WhatsAppMessagesPanel(key: _waInboxKey);
+  }
+
   Widget _memberDetailPanel(AdminUser user) {
+    final whatsappRaw = (user.whatsapp ?? '').trim();
+    final canMessageOnWhatsApp = whatsappRaw.isNotEmpty;
+
     return ListView(
       padding: const EdgeInsets.all(14),
       children: [
@@ -778,6 +997,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
             _info('WhatsApp', user.whatsapp ?? '—'),
             _info('Created', _fmtDate(user.createdAt)),
           ],
+        ),
+        const SizedBox(height: 10),
+        Align(
+          alignment: Alignment.centerLeft,
+          child: FilledButton.icon(
+            onPressed: canMessageOnWhatsApp
+                ? () => _openWhatsAppChat(
+                    rawPhone: whatsappRaw,
+                    name: '${user.name ?? ''} ${user.surname ?? ''}'.trim(),
+                  )
+                : null,
+            icon: const Icon(Icons.chat),
+            label: const Text('WhatsApp Message'),
+          ),
         ),
         const SizedBox(height: 14),
         const Divider(),
@@ -927,7 +1160,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     ? const Center(child: Text('No ads available.'))
                     : ListView.separated(
                         itemCount: _ads.length,
-                        separatorBuilder: (_, __) => const Divider(height: 1),
+                        separatorBuilder: (_, index) =>
+                            const Divider(height: 1),
                         itemBuilder: (_, i) {
                           final ad = _ads[i];
                           final image = (ad.thumbUrl ?? ad.imageUrl ?? '')
@@ -985,7 +1219,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         width: width,
         height: height,
         fit: BoxFit.cover,
-        errorBuilder: (_, __, ___) => Container(
+        errorBuilder: (_, error, stackTrace) => Container(
           width: width,
           height: height,
           color: Colors.black26,
@@ -1010,7 +1244,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 child: Image.network(
                   imageUrl,
                   fit: BoxFit.cover,
-                  errorBuilder: (_, __, ___) =>
+                  errorBuilder: (_, error, stackTrace) =>
                       const Center(child: Icon(Icons.broken_image)),
                 ),
               ),
@@ -1174,6 +1408,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             itemCount: _invites.length,
                             itemBuilder: (_, i) {
                               final invite = _invites[i];
+                              final inviteWhatsApp =
+                                  (invite.whatsappPhone ?? '').trim();
+
                               return ListTile(
                                 leading: Icon(
                                   invite.status == 'used'
@@ -1187,12 +1424,26 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                   '${invite.email}\nStatus: ${invite.status} • Expires: ${_fmtDate(invite.expiresAt)}',
                                 ),
                                 isThreeLine: true,
-                                trailing: invite.status == 'used'
-                                    ? const SizedBox.shrink()
-                                    : TextButton(
+                                trailing: Row(
+                                  mainAxisSize: MainAxisSize.min,
+                                  children: [
+                                    if (inviteWhatsApp.isNotEmpty)
+                                      IconButton(
+                                        tooltip: 'WhatsApp message',
+                                        onPressed: () => _openWhatsAppChat(
+                                          rawPhone: inviteWhatsApp,
+                                          name:
+                                              '${invite.name} ${invite.surname}',
+                                        ),
+                                        icon: const Icon(Icons.chat_outlined),
+                                      ),
+                                    if (invite.status != 'used')
+                                      TextButton(
                                         onPressed: () => _resendInvite(invite),
                                         child: const Text('Resend'),
                                       ),
+                                  ],
+                                ),
                               );
                             },
                           ),
@@ -1202,6 +1453,212 @@ class _AdminDashboardState extends State<AdminDashboard> {
             ),
           ),
         ],
+      ),
+    );
+  }
+
+  Color _adminCallStatusColor(String status) {
+    switch (status.trim().toLowerCase()) {
+      case 'resolved':
+        return Colors.green;
+      case 'in_progress':
+        return Colors.orange;
+      default:
+        return Colors.blueGrey;
+    }
+  }
+
+  String _callTitle(AdminWhatsAppCall call) {
+    final name = (call.contactName ?? '').trim();
+    if (name.isNotEmpty) return name;
+    final userName = (call.username ?? '').trim();
+    if (userName.isNotEmpty) return userName;
+    final from = (call.fromNumber ?? '').trim();
+    if (from.isNotEmpty) return from;
+    return 'Unknown caller';
+  }
+
+  Widget _whatsAppCallsTab() {
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Card(
+        child: Column(
+          children: [
+            ListTile(
+              title: const Text('WhatsApp Calls'),
+              subtitle: Text('${_calls.length} call event(s)'),
+              trailing: Wrap(
+                spacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  DropdownButton<String>(
+                    value: _callsAdminStatus,
+                    items: const [
+                      DropdownMenuItem(value: 'all', child: Text('All Admin')),
+                      DropdownMenuItem(value: 'open', child: Text('Open')),
+                      DropdownMenuItem(
+                        value: 'in_progress',
+                        child: Text('In Progress'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'resolved',
+                        child: Text('Resolved'),
+                      ),
+                    ],
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setState(() => _callsAdminStatus = value);
+                      await _loadWhatsAppCalls();
+                    },
+                  ),
+                  DropdownButton<String>(
+                    value: _callsDirection,
+                    items: const [
+                      DropdownMenuItem(value: 'all', child: Text('All Dir')),
+                      DropdownMenuItem(
+                        value: 'inbound',
+                        child: Text('Inbound'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'outbound',
+                        child: Text('Outbound'),
+                      ),
+                    ],
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setState(() => _callsDirection = value);
+                      await _loadWhatsAppCalls();
+                    },
+                  ),
+                  DropdownButton<String>(
+                    value: _callsEventStatus,
+                    items: const [
+                      DropdownMenuItem(value: 'all', child: Text('All Event')),
+                      DropdownMenuItem(
+                        value: 'ringing',
+                        child: Text('Ringing'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'accepted',
+                        child: Text('Accepted'),
+                      ),
+                      DropdownMenuItem(value: 'missed', child: Text('Missed')),
+                      DropdownMenuItem(value: 'ended', child: Text('Ended')),
+                      DropdownMenuItem(
+                        value: 'rejected',
+                        child: Text('Rejected'),
+                      ),
+                    ],
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setState(() => _callsEventStatus = value);
+                      await _loadWhatsAppCalls();
+                    },
+                  ),
+                  IconButton(
+                    tooltip: 'Refresh calls',
+                    onPressed: _callsLoading ? null : _loadWhatsAppCalls,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: TextField(
+                controller: _callsSearchCtrl,
+                decoration: InputDecoration(
+                  labelText: 'Search call id / phone / note',
+                  border: const OutlineInputBorder(),
+                  suffixIcon: IconButton(
+                    onPressed: () async {
+                      _callsSearchCtrl.clear();
+                      await _loadWhatsAppCalls();
+                    },
+                    icon: const Icon(Icons.clear),
+                  ),
+                ),
+                onSubmitted: (_) => _loadWhatsAppCalls(),
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: _callsLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _callsError != null
+                  ? Center(child: Text('Error: $_callsError'))
+                  : _calls.isEmpty
+                  ? const Center(child: Text('No WhatsApp call events found.'))
+                  : ListView.separated(
+                      itemCount: _calls.length,
+                      separatorBuilder: (_, index) => const Divider(height: 1),
+                      itemBuilder: (_, i) {
+                        final call = _calls[i];
+                        final fromNumber = (call.fromNumber ?? '').trim();
+                        final toNumber = (call.toNumber ?? '').trim();
+                        final forChat = fromNumber.isNotEmpty
+                            ? fromNumber
+                            : (call.userWhatsappPhone ?? '');
+                        final isUpdating = _updatingCallId == call.id;
+
+                        return ListTile(
+                          leading: Icon(
+                            (call.direction ?? '').toLowerCase() == 'outbound'
+                                ? Icons.call_made
+                                : Icons.call_received,
+                          ),
+                          title: Text(_callTitle(call)),
+                          subtitle: Text(
+                            'From: ${fromNumber.isEmpty ? '—' : fromNumber} • To: ${toNumber.isEmpty ? '—' : toNumber}\n'
+                            'Event: ${(call.callStatus ?? call.eventType ?? 'unknown')} • When: ${_fmtDate(call.occurredAt ?? call.receivedAt)}',
+                          ),
+                          isThreeLine: true,
+                          trailing: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              Chip(
+                                label: Text(call.adminStatus),
+                                backgroundColor: _adminCallStatusColor(
+                                  call.adminStatus,
+                                ).withValues(alpha: 0.18),
+                              ),
+                              IconButton(
+                                tooltip: 'WhatsApp chat',
+                                onPressed: forChat.trim().isEmpty
+                                    ? null
+                                    : () => _openWhatsAppChat(
+                                        rawPhone: forChat,
+                                        name: _callTitle(call),
+                                      ),
+                                icon: const Icon(Icons.chat_outlined),
+                              ),
+                              PopupMenuButton<String>(
+                                enabled: !isUpdating,
+                                onSelected: (next) =>
+                                    _setWhatsAppCallStatus(call, next),
+                                itemBuilder: (_) => const [
+                                  PopupMenuItem(
+                                    value: 'open',
+                                    child: Text('Set Open'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'in_progress',
+                                    child: Text('Set In Progress'),
+                                  ),
+                                  PopupMenuItem(
+                                    value: 'resolved',
+                                    child: Text('Set Resolved'),
+                                  ),
+                                ],
+                              ),
+                            ],
+                          ),
+                        );
+                      },
+                    ),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -1272,7 +1729,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   ? const Center(child: Text('No invoices found.'))
                   : ListView.separated(
                       itemCount: _invoices.length,
-                      separatorBuilder: (_, __) => const Divider(height: 1),
+                      separatorBuilder: (_, index) => const Divider(height: 1),
                       itemBuilder: (_, i) {
                         final invoice = _invoices[i];
                         return ListTile(

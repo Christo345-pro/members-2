@@ -2,23 +2,31 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "C/C++ Runner: Debug Session",
-      "type": "cppdbg",
+      "name": "Members Admin (Linux)",
+      "type": "dart",
       "request": "launch",
-      "args": [],
-      "stopAtEntry": false,
-      "externalConsole": true,
-      "cwd": "c:/HOOLIGAN_AP/Weather_Hooligan_members/members",
-      "program": "c:/HOOLIGAN_AP/Weather_Hooligan_members/members/build/Debug/outDebug",
-      "MIMode": "gdb",
-      "miDebuggerPath": "gdb",
-      "setupCommands": [
-        {
-          "description": "Enable pretty-printing for gdb",
-          "text": "-enable-pretty-printing",
-          "ignoreFailures": true
-        }
+      "program": "lib/main.dart",
+      "deviceId": "linux"
+    },
+    {
+      "name": "Members Admin (Web Server 8082)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "web-server",
+      "args": [
+        "--web-hostname",
+        "0.0.0.0",
+        "--web-port",
+        "8082"
       ]
+    },
+    {
+      "name": "Members Admin (Chrome)",
+      "type": "dart",
+      "request": "launch",
+      "program": "lib/main.dart",
+      "deviceId": "chrome"
     }
   ]
 }
