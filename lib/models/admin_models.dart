@@ -212,6 +212,7 @@ class AdminAd {
   final String? message;
 
   final String? imageUrl; // full image
+  final String? smallUrl; // small web slot image (16:9)
   final String? thumbUrl; // 16:9 thumb
 
   final String? linkUrl;
@@ -227,6 +228,7 @@ class AdminAd {
     required this.title,
     this.message,
     this.imageUrl,
+    this.smallUrl,
     this.thumbUrl,
     this.linkUrl,
     required this.active,
@@ -243,6 +245,9 @@ class AdminAd {
       message: _readString(j['message']),
       // Laravel appends: image_url + thumb_url
       imageUrl: _readString(j['image_url'] ?? j['imageUrl']),
+      smallUrl: _readString(
+        j['small_url'] ?? j['smallUrl'] ?? j['small_path'] ?? j['smallPath'],
+      ),
       thumbUrl: _readString(
         j['thumb_url'] ??
             j['thumbUrl'] ??

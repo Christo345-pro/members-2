@@ -307,7 +307,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final weightCtrl = TextEditingController();
 
     bool active = true;
-    PlatformFile? fullImage;
+    PlatformFile? largeImage;
+    PlatformFile? smallWebImage;
     PlatformFile? thumbImage;
 
     final ok = await showDialog<bool>(
@@ -372,11 +373,41 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       ],
                     ),
                     const Divider(height: 20),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Upload specs:',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Large ad (required, full/open view): 1920x1080 (16:9) preferred, minimum 1600x900.',
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Small web ad (homepage strips, app shell web strips): 1366x768 preferred, minimum 960x540.',
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Card/thumb ad (required, Ads tab cards): 1280x720 (16:9) preferred, minimum 960x540.',
+                      ),
+                    ),
+                    const Divider(height: 20),
+
                     Row(
                       children: [
                         Expanded(
                           child: Text(
-                            'Full image: ${fileName(fullImage)}',
+                            'Large image (homepage): ${fileName(largeImage)}',
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -385,9 +416,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           onPressed: () async {
                             final f = await _pickImageFile();
                             if (f == null) return;
-                            setLocal(() => fullImage = f);
+                            setLocal(() => largeImage = f);
                           },
-                          child: const Text('Pick Full'),
+                          child: const Text('Pick Large'),
                         ),
                       ],
                     ),
@@ -396,7 +427,27 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       children: [
                         Expanded(
                           child: Text(
-                            'Thumb image: ${fileName(thumbImage)}',
+                            'Small web image: ${fileName(smallWebImage)}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () async {
+                            final f = await _pickImageFile();
+                            if (f == null) return;
+                            setLocal(() => smallWebImage = f);
+                          },
+                          child: const Text('Pick Small'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Card/thumb image: ${fileName(thumbImage)}',
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -428,9 +479,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     );
                     return;
                   }
-                  if (fullImage == null || fullImage?.bytes == null) {
+                  if (largeImage == null || largeImage?.bytes == null) {
                     ScaffoldMessenger.of(ctx).showSnackBar(
-                      const SnackBar(content: Text('Pick the full image.')),
+                      const SnackBar(
+                        content: Text('Pick the large homepage image.'),
+                      ),
                     );
                     return;
                   }
@@ -466,8 +519,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
         linkUrl: linkCtrl.text.trim().isEmpty ? null : linkCtrl.text.trim(),
         active: active,
         weight: int.tryParse(weightCtrl.text.trim()),
-        imageBytes: fullImage!.bytes!,
-        imageName: fullImage!.name,
+        imageBytes: largeImage!.bytes!,
+        imageName: largeImage!.name,
+        smallBytes: smallWebImage?.bytes,
+        smallName: smallWebImage?.name,
         thumbBytes: thumbImage!.bytes!,
         thumbName: thumbImage!.name,
       );
@@ -1149,6 +1204,35 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   child: Text('Upload is disabled on this platform.'),
                 ),
               ],
+              const SizedBox(height: 8),
+              Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.black12,
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: Colors.black12),
+                ),
+                child: const Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Ad upload resolutions',
+                      style: TextStyle(fontWeight: FontWeight.w700),
+                    ),
+                    SizedBox(height: 4),
+                    Text(
+                      'Large (required, full/open view): 1920x1080 preferred, minimum 1600x900.',
+                    ),
+                    Text(
+                      'Small web (recommended, homepage + app shell strips): 1366x768 preferred, minimum 960x540.',
+                    ),
+                    Text(
+                      'Card/Thumb (required, Ads tab cards): 1280x720 preferred, minimum 960x540.',
+                    ),
+                  ],
+                ),
+              ),
               const SizedBox(height: 12),
               const Divider(),
               Expanded(

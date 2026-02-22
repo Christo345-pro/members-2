@@ -25,7 +25,7 @@ class AdminOtpChallenge {
 class AdminService {
   static const String _baseUrl = String.fromEnvironment(
     'ADMIN_API_BASE_URL',
-    defaultValue: 'https://devtest.weather-hooligan.co.za',
+    defaultValue: 'https://api.weather-hooligan.co.za',
   );
   static const Duration _timeout = Duration(seconds: 30);
 
@@ -288,13 +288,18 @@ class AdminService {
     String? endsAtIso,
     required Uint8List imageBytes,
     required String imageName,
+    Uint8List? smallBytes,
+    String? smallName,
     required Uint8List thumbBytes,
     required String thumbName,
   }) async {
     final t = (_token ?? '').trim();
     if (t.isEmpty) throw Exception('No admin token set. Please login again.');
 
-    if (imageBytes.isEmpty) throw Exception('Full image file is empty.');
+    if (imageBytes.isEmpty) throw Exception('Large image file is empty.');
+    if (smallBytes != null && smallBytes.isEmpty) {
+      throw Exception('Small web image file is empty.');
+    }
     if (thumbBytes.isEmpty) throw Exception('Thumb image file is empty.');
 
     final uri = Uri.parse('$_baseUrl/api/admin/ads');
@@ -321,8 +326,19 @@ class AdminService {
     }
 
     req.files.add(
-      http.MultipartFile.fromBytes('image', imageBytes, filename: imageName),
+      http.MultipartFile.fromBytes('large', imageBytes, filename: imageName),
     );
+    if (smallBytes != null &&
+        smallName != null &&
+        smallName.trim().isNotEmpty) {
+      req.files.add(
+        http.MultipartFile.fromBytes(
+          'small',
+          smallBytes,
+          filename: smallName.trim(),
+        ),
+      );
+    }
     req.files.add(
       http.MultipartFile.fromBytes('thumb', thumbBytes, filename: thumbName),
     );
