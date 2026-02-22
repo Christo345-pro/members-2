@@ -19,7 +19,7 @@ samples, guidance on mobile development, and a full API reference.
 
 The app reads config values from compile-time environment variables:
 
-- `ADMIN_API_BASE_URL` (default: `https://devtest.weather-hooligan.co.za`)
+- `ADMIN_API_BASE_URL` (default: `https://api.weather-hooligan.co.za`)
 - `MEMBERS_WHATSAPP_DEFAULT_COUNTRY_CODE` (default: `27`)
 - `MEMBERS_WHATSAPP_MESSAGE_TEMPLATE` (default: `Hello {name}, this is Weather Hooligan support.`)
 - `MEMBERS_WHATSAPP_MESSAGE_DEFAULT` (default: `Hello from Weather Hooligan support.`)
@@ -30,7 +30,7 @@ Example:
 
 ```bash
 flutter run \
-  --dart-define=ADMIN_API_BASE_URL=https://devtest.weather-hooligan.co.za \
+  --dart-define=ADMIN_API_BASE_URL=https://api.weather-hooligan.co.za \
   --dart-define=MEMBERS_WHATSAPP_DEFAULT_COUNTRY_CODE=27 \
   --dart-define=MEMBERS_WHATSAPP_MESSAGE_TEMPLATE="Hi {name}, Weather Hooligan here." \
   --dart-define=MEMBERS_WHATSAPP_MESSAGE_DEFAULT="Hi from Weather Hooligan."
@@ -53,3 +53,14 @@ http://<server-ip>:8082
 You can also launch from VS Code with:
 
 - `Members Admin (Web Server 8082)` in `.vscode/launch.json`
+
+## Ad Creative Legend
+
+Use these sizes when uploading ads in `members-2`:
+
+- `Large` (required): `1920x1080` preferred, minimum `1600x900`
+  Used for full/open ad view.
+- `Small Web` (recommended): `1366x768` preferred, minimum `960x540`
+  Used for website rotating ad strips (Home, App Shell, Live Data).
+- `Card/Thumb` (required): `1280x720` preferred, minimum `960x540`
+  Used for ad listing cards.

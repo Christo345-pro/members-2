@@ -77,7 +77,8 @@ class _AdsScreenState extends State<AdsScreen> {
     final weightCtrl = TextEditingController();
 
     bool active = true;
-    PlatformFile? fullImage;
+    PlatformFile? largeImage;
+    PlatformFile? smallWebImage;
     PlatformFile? thumbImage;
 
     Future<PlatformFile?> pickImage() async {
@@ -158,11 +159,41 @@ class _AdsScreenState extends State<AdsScreen> {
                       ),
                       const Divider(height: 26),
 
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Upload specs:',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                      const SizedBox(height: 6),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Large ad (required, full/open view): 1920x1080 (16:9) preferred, minimum 1600x900.',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Small web ad (homepage strips, app shell web strips): 1366x768 preferred, minimum 960x540.',
+                        ),
+                      ),
+                      const SizedBox(height: 4),
+                      const Align(
+                        alignment: Alignment.centerLeft,
+                        child: Text(
+                          'Card/thumb ad (Ads tab cards): 1280x720 preferred, minimum 960x540.',
+                        ),
+                      ),
+                      const Divider(height: 24),
+
                       Row(
                         children: [
                           Expanded(
                             child: Text(
-                              'Full image: ${fileName(fullImage)}',
+                              'Large image (homepage): ${fileName(largeImage)}',
                               overflow: TextOverflow.ellipsis,
                             ),
                           ),
@@ -171,11 +202,34 @@ class _AdsScreenState extends State<AdsScreen> {
                             onPressed: () async {
                               final f = await pickImage();
                               if (f == null) return;
-                              fullImage = f;
+                              largeImage = f;
                               refresh();
                             },
                             icon: const Icon(Icons.image),
-                            label: const Text('Pick full'),
+                            label: const Text('Pick large'),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 10),
+
+                      Row(
+                        children: [
+                          Expanded(
+                            child: Text(
+                              'Small web image: ${fileName(smallWebImage)}',
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ),
+                          const SizedBox(width: 10),
+                          OutlinedButton.icon(
+                            onPressed: () async {
+                              final f = await pickImage();
+                              if (f == null) return;
+                              smallWebImage = f;
+                              refresh();
+                            },
+                            icon: const Icon(Icons.web),
+                            label: const Text('Pick small'),
                           ),
                         ],
                       ),
@@ -205,7 +259,7 @@ class _AdsScreenState extends State<AdsScreen> {
 
                       const SizedBox(height: 10),
                       const Text(
-                        'Tip: Thumb should be 16:9 for pretty cards 😉',
+                        'Legend: Large = fullscreen/detail, Small web = website rotating strips, Thumb = ads list cards. Max 12MB each.',
                       ),
                     ],
                   ),
@@ -224,9 +278,11 @@ class _AdsScreenState extends State<AdsScreen> {
                       );
                       return;
                     }
-                    if (fullImage == null || fullImage.bytes == null) {
+                    if (largeImage == null || largeImage?.bytes == null) {
                       ScaffoldMessenger.of(ctx).showSnackBar(
-                        const SnackBar(content: Text('Pick a FULL image.')),
+                        const SnackBar(
+                          content: Text('Pick a LARGE homepage image.'),
+                        ),
                       );
                       return;
                     }
@@ -259,10 +315,12 @@ class _AdsScreenState extends State<AdsScreen> {
         linkUrl: linkCtrl.text.trim().isEmpty ? null : linkCtrl.text.trim(),
         active: active,
         weight: weight, // int? (leave null if empty)
-        imageBytes: fullImage!.bytes!,
-        imageName: fullImage!.name,
-        thumbBytes: (thumbImage ?? fullImage)!.bytes!,
-        thumbName: (thumbImage ?? fullImage)!.name,
+        imageBytes: largeImage!.bytes!,
+        imageName: largeImage!.name,
+        smallBytes: smallWebImage?.bytes,
+        smallName: smallWebImage?.name,
+        thumbBytes: (thumbImage ?? largeImage)!.bytes!,
+        thumbName: (thumbImage ?? largeImage)!.name,
       );
 
       _toast('Ad uploaded ✅');
@@ -411,41 +469,78 @@ class _AdsScreenState extends State<AdsScreen> {
           const SizedBox(width: 12),
         ],
       ),
-      body: _loading
-          ? const Center(child: CircularProgressIndicator())
-          : _error != null
-          ? Center(child: Text('Error: $_error'))
-          : _ads.isEmpty
-          ? const Center(child: Text('No ads yet. Upload one 😄'))
-          : ListView.separated(
-              padding: const EdgeInsets.all(12),
-              itemCount: _ads.length,
-              separatorBuilder: (_, __) => const Divider(height: 1),
-              itemBuilder: (_, i) {
-                final ad = _ads[i];
-                final img = (ad.thumbUrl ?? ad.imageUrl ?? '').trim();
-
-                return Card(
-                  child: ListTile(
-                    leading: _thumbBox(img),
-                    title: Text(ad.title),
-                    subtitle: Text(
-                      [
-                        ad.active ? 'ACTIVE' : 'INACTIVE',
-                        if ((ad.weight ?? 0) > 0) 'weight=${ad.weight}',
-                        if ((ad.linkUrl ?? '').trim().isNotEmpty) 'link set',
-                      ].join(' • '),
-                    ),
-                    onTap: () => _openPreview(ad),
-                    trailing: IconButton(
-                      tooltip: 'Delete',
-                      onPressed: () => _deleteAd(ad),
-                      icon: const Icon(Icons.delete, color: Colors.redAccent),
-                    ),
-                  ),
-                );
-              },
+      body: Column(
+        children: [
+          Container(
+            width: double.infinity,
+            margin: const EdgeInsets.fromLTRB(12, 12, 12, 0),
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: Colors.black12,
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.black12),
             ),
+            child: const Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  'Ad upload resolutions',
+                  style: TextStyle(fontWeight: FontWeight.w700),
+                ),
+                SizedBox(height: 4),
+                Text(
+                  'Large/Homepage (required): 1920x1080 preferred, minimum 1600x900.',
+                ),
+                Text(
+                  'Card/Thumb (recommended): 1280x720 preferred, minimum 960x540.',
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 10),
+          Expanded(
+            child: _loading
+                ? const Center(child: CircularProgressIndicator())
+                : _error != null
+                ? Center(child: Text('Error: $_error'))
+                : _ads.isEmpty
+                ? const Center(child: Text('No ads yet. Upload one 😄'))
+                : ListView.separated(
+                    padding: const EdgeInsets.all(12),
+                    itemCount: _ads.length,
+                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    itemBuilder: (_, i) {
+                      final ad = _ads[i];
+                      final img = (ad.thumbUrl ?? ad.imageUrl ?? '').trim();
+
+                      return Card(
+                        child: ListTile(
+                          leading: _thumbBox(img),
+                          title: Text(ad.title),
+                          subtitle: Text(
+                            [
+                              ad.active ? 'ACTIVE' : 'INACTIVE',
+                              if ((ad.weight ?? 0) > 0) 'weight=${ad.weight}',
+                              if ((ad.linkUrl ?? '').trim().isNotEmpty)
+                                'link set',
+                            ].join(' • '),
+                          ),
+                          onTap: () => _openPreview(ad),
+                          trailing: IconButton(
+                            tooltip: 'Delete',
+                            onPressed: () => _deleteAd(ad),
+                            icon: const Icon(
+                              Icons.delete,
+                              color: Colors.redAccent,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
     );
   }
 }
