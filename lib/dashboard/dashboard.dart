@@ -1343,7 +1343,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
       if (dateFilter.isNotEmpty && !_dateMatches(u.createdAt, dateFilter)) {
         return false;
       }
-      if (_memberPlanFilter != 'all' &&
+      if (_memberPlanFilter != 'all' && _memberPlanFilter == 'other') {
+        if (['free', 'premium', 'trial'].contains(accountType)) {
+          return false;
+        }
+      } else if (_memberPlanFilter != 'all' &&
           accountType != _memberPlanFilter.trim().toLowerCase()) {
         return false;
       }
@@ -1443,7 +1447,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       SizedBox(
                         width: 130,
                         child: DropdownButtonFormField<String>(
-                          value: _memberPlanFilter,
+                          initialValue: _memberPlanFilter,
                           decoration: const InputDecoration(
                             labelText: 'Account Type',
                             border: OutlineInputBorder(),
@@ -1461,6 +1465,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             DropdownMenuItem(
                               value: 'trial',
                               child: Text('Trial'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'other',
+                              child: Text('Other'),
                             ),
                           ],
                           onChanged: (value) {
@@ -2112,7 +2120,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   SizedBox(
                     width: 160,
                     child: DropdownButtonFormField<String>(
-                      value: _statsLevelFilter,
+                      initialValue: _statsLevelFilter,
                       decoration: const InputDecoration(
                         labelText: 'Log level',
                         border: OutlineInputBorder(),
