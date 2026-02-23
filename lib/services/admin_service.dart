@@ -485,6 +485,21 @@ class AdminService {
     );
   }
 
+  Future<void> clearLaravelLogs() async {
+    final uri = Uri.parse('$_baseUrl/api/admin/stats/logs/clear');
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: '{}')
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) return;
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to clear logs (${res.statusCode}).',
+    );
+  }
+
   Future<List<AdminInvite>> fetchInvites({
     String status = 'all',
     int limit = 200,
