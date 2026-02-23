@@ -231,6 +231,99 @@ class AdminService {
     );
   }
 
+  Future<AdminUser> createMemberUser({
+    required String username,
+    required String email,
+    required String name,
+    String? surname,
+    String? phone,
+    String? whatsapp,
+    required String password,
+    String? plan,
+    bool appAndroid = false,
+    bool appWindows = false,
+    bool appWeb = false,
+    bool isBlocked = false,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/users');
+    final payload = <String, dynamic>{
+      'username': username.trim(),
+      'email': email.trim().toLowerCase(),
+      'name': name.trim(),
+      'password': password,
+      'app_android': appAndroid,
+      'app_windows': appWindows,
+      'app_web': appWeb,
+      'is_blocked': isBlocked,
+      if ((surname ?? '').trim().isNotEmpty) 'surname': surname!.trim(),
+      if ((phone ?? '').trim().isNotEmpty) 'phone': phone!.trim(),
+      if ((whatsapp ?? '').trim().isNotEmpty) 'whatsapp': whatsapp!.trim(),
+      if ((plan ?? '').trim().isNotEmpty) 'plan': plan!.trim(),
+    };
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final userRaw = body is Map ? body['user'] : null;
+      if (userRaw is Map) {
+        return AdminUser.fromJson(userRaw.cast<String, dynamic>());
+      }
+      if (body is Map && body.containsKey('id')) {
+        return AdminUser.fromJson(body.cast<String, dynamic>());
+      }
+      throw Exception('User created, but response payload missing user.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to create user (${res.statusCode}).',
+    );
+  }
+
+  Future<void> setMemberPassword({
+    required int userId,
+    required String newPassword,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/password');
+
+    final res = await http
+        .post(
+          uri,
+          headers: _headers(jsonBody: true),
+          body: jsonEncode({'password': newPassword}),
+        )
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) return;
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to set member password (${res.statusCode}).',
+    );
+  }
+
+  Future<bool> toggleMemberBlock(int userId) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/block');
+
+    final res = await http.post(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map) {
+        return _parseBoolLoose(body['is_blocked']);
+      }
+      return false;
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to toggle member block (${res.statusCode}).',
+    );
+  }
+
   Future<void> sendGeneralPush({
     required String title,
     required String body,
@@ -884,6 +977,13 @@ class AdminService {
       return (body['token'] ?? '').toString().trim();
     }
     return '';
+  }
+
+  bool _parseBoolLoose(dynamic value) {
+    if (value is bool) return value;
+    if (value is num) return value != 0;
+    final s = (value ?? '').toString().trim().toLowerCase();
+    return s == '1' || s == 'true' || s == 'yes' || s == 'y';
   }
 
   String? _extractMessage(dynamic body) {
