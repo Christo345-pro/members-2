@@ -381,8 +381,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
-  Future<void> _loadAds() async {
-    if (_adsLoading) return;
+  Future<void> _loadAds({bool force = false}) async {
+    if (_adsLoading && !force) return;
 
     setState(() {
       _adsLoading = true;
@@ -447,7 +447,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     setState(() => _adsLoading = true);
     try {
       await deleteAction(ad.id);
-      await _loadAds();
+      await _loadAds(force: true);
       _toast('$placementLabel ad deleted.');
     } catch (e) {
       _toast('Delete failed: $e');
@@ -654,7 +654,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
           imageName: imageFile!.name,
         );
       }
-      await _loadAds();
+      await _loadAds(force: true);
       _toast('$placementLabel ad uploaded.');
     } catch (e) {
       _toast('Upload failed: $e');
@@ -884,7 +884,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         thumbBytes: thumbImage!.bytes!,
         thumbName: thumbImage!.name,
       );
-      await _loadAds();
+      await _loadAds(force: true);
       _toast('App + portal ad uploaded.');
     } catch (e) {
       _toast('Upload failed: $e');
@@ -921,6 +921,42 @@ class _AdminDashboardState extends State<AdminDashboard> {
       setState(() => _statsError = e.toString());
     } finally {
       if (mounted) setState(() => _statsLoading = false);
+    }
+  }
+
+  Future<void> _clearStatsLogs() async {
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Clear Laravel logs?'),
+        content: const Text(
+          'This will remove historical log lines from all current log files.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Clear Logs'),
+          ),
+        ],
+      ),
+    );
+
+    if (ok != true) return;
+
+    setState(() => _statsLoading = true);
+    try {
+      await _service.clearLaravelLogs();
+      if (!mounted) return;
+      _toast('Laravel logs cleared.');
+      await _loadStats();
+    } catch (e) {
+      if (!mounted) return;
+      _toast('Clear logs failed: $e');
+      setState(() => _statsLoading = false);
     }
   }
 
@@ -2075,6 +2111,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     onPressed: _statsLoading ? null : _loadStats,
                     icon: const Icon(Icons.refresh),
                     label: const Text('Refresh'),
+                  ),
+                  const SizedBox(width: 8),
+                  FilledButton.icon(
+                    onPressed: _statsLoading ? null : _clearStatsLogs,
+                    icon: const Icon(Icons.delete_sweep),
+                    label: const Text('Clear Logs'),
                   ),
                 ],
               ),
