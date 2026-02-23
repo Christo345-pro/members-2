@@ -57,6 +57,23 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _memberDateCtrl = TextEditingController();
   String _memberPlanFilter = 'all';
 
+  bool _toolsBusy = false;
+  int? _toolsUserId;
+  String _toolsAction = 'Create user';
+  final _toolCreateUsernameCtrl = TextEditingController();
+  final _toolCreateEmailCtrl = TextEditingController();
+  final _toolCreateNameCtrl = TextEditingController();
+  final _toolCreateSurnameCtrl = TextEditingController();
+  final _toolCreatePhoneCtrl = TextEditingController();
+  final _toolCreateWhatsAppCtrl = TextEditingController();
+  final _toolCreatePlanCtrl = TextEditingController(text: 'free');
+  final _toolCreatePasswordCtrl = TextEditingController();
+  bool _toolCreateAndroid = false;
+  bool _toolCreateWindows = false;
+  bool _toolCreateWeb = false;
+  final _toolPasswordCtrl = TextEditingController();
+  final _toolPasswordConfirmCtrl = TextEditingController();
+
   bool _pushSending = false;
   final _pushMessageCtrl = TextEditingController();
 
@@ -129,6 +146,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _memberAccountCtrl.dispose();
     _memberEmailCtrl.dispose();
     _memberDateCtrl.dispose();
+    _toolCreateUsernameCtrl.dispose();
+    _toolCreateEmailCtrl.dispose();
+    _toolCreateNameCtrl.dispose();
+    _toolCreateSurnameCtrl.dispose();
+    _toolCreatePhoneCtrl.dispose();
+    _toolCreateWhatsAppCtrl.dispose();
+    _toolCreatePlanCtrl.dispose();
+    _toolCreatePasswordCtrl.dispose();
+    _toolPasswordCtrl.dispose();
+    _toolPasswordConfirmCtrl.dispose();
     _pushMessageCtrl.dispose();
     _adsSearchCtrl.dispose();
 
@@ -219,23 +246,26 @@ class _AdminDashboardState extends State<AdminDashboard> {
         await _loadMembers();
         break;
       case 1:
+        await _loadMembers();
         break;
       case 2:
-        await _loadAds();
         break;
       case 3:
-        await _loadInvites();
+        await _loadAds();
         break;
       case 4:
-        await _loadInvoices();
+        await _loadInvites();
         break;
       case 5:
-        await _loadStats();
+        await _loadInvoices();
         break;
       case 6:
-        await _waInboxKey.currentState?.refreshAll();
+        await _loadStats();
         break;
       case 7:
+        await _waInboxKey.currentState?.refreshAll();
+        break;
+      case 8:
         await _loadWhatsAppCalls();
         break;
     }
@@ -262,6 +292,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         if (!mounted) return;
         setState(() {
           _selectedMemberId = null;
+          _toolsUserId = null;
           _memberDetail = null;
         });
         return;
@@ -270,6 +301,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
       _selectedMemberId ??= _members.first.id;
       if (!_members.any((u) => u.id == _selectedMemberId)) {
         _selectedMemberId = _members.first.id;
+      }
+      _toolsUserId ??= _selectedMemberId;
+      if (!_members.any((u) => u.id == _toolsUserId)) {
+        _toolsUserId = _selectedMemberId;
       }
 
       final detail = await _service.fetchMemberDetail(_selectedMemberId!);
@@ -346,6 +381,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
     setState(() {
       _selectedMemberId = user.id;
+      _toolsUserId = user.id;
       _membersLoading = true;
       _membersError = null;
     });
@@ -359,6 +395,148 @@ class _AdminDashboardState extends State<AdminDashboard> {
     } finally {
       if (mounted) setState(() => _membersLoading = false);
     }
+  }
+
+  AdminUser? _findMemberById(int? id) {
+    if (id == null) return null;
+    for (final member in _members) {
+      if (member.id == id) return member;
+    }
+    return null;
+  }
+
+  void _resetCreateUserToolForm() {
+    _toolCreateUsernameCtrl.clear();
+    _toolCreateEmailCtrl.clear();
+    _toolCreateNameCtrl.clear();
+    _toolCreateSurnameCtrl.clear();
+    _toolCreatePhoneCtrl.clear();
+    _toolCreateWhatsAppCtrl.clear();
+    _toolCreatePlanCtrl.text = 'free';
+    _toolCreatePasswordCtrl.clear();
+    _toolCreateAndroid = false;
+    _toolCreateWindows = false;
+    _toolCreateWeb = false;
+  }
+
+  Future<void> _runToolsAction() async {
+    if (_toolsBusy) return;
+
+    setState(() => _toolsBusy = true);
+    try {
+      if (_toolsAction == 'Create user') {
+        final username = _toolCreateUsernameCtrl.text.trim();
+        final email = _toolCreateEmailCtrl.text.trim().toLowerCase();
+        final name = _toolCreateNameCtrl.text.trim();
+        final password = _toolCreatePasswordCtrl.text;
+
+        if (username.isEmpty || email.isEmpty || name.isEmpty) {
+          _toast('Username, email and name are required.');
+          return;
+        }
+        if (password.trim().length < 8) {
+          _toast('Password must be at least 8 characters.');
+          return;
+        }
+
+        final created = await _service.createMemberUser(
+          username: username,
+          email: email,
+          name: name,
+          surname: _toolCreateSurnameCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreateSurnameCtrl.text.trim(),
+          phone: _toolCreatePhoneCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreatePhoneCtrl.text.trim(),
+          whatsapp: _toolCreateWhatsAppCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreateWhatsAppCtrl.text.trim(),
+          password: password,
+          plan: _toolCreatePlanCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreatePlanCtrl.text.trim(),
+          appAndroid: _toolCreateAndroid,
+          appWindows: _toolCreateWindows,
+          appWeb: _toolCreateWeb,
+        );
+
+        _toast('User created: ${created.username}');
+        _resetCreateUserToolForm();
+        await _loadMembers();
+        if (!mounted) return;
+        setState(() {
+          _selectedMemberId = created.id;
+          _toolsUserId = created.id;
+        });
+        return;
+      }
+
+      final targetId = _toolsUserId ?? _selectedMemberId;
+      if (targetId == null) {
+        _toast('Select a user first.');
+        return;
+      }
+
+      if (_toolsAction == 'Set password') {
+        final password = _toolPasswordCtrl.text;
+        final confirm = _toolPasswordConfirmCtrl.text;
+        if (password.trim().length < 8) {
+          _toast('Password must be at least 8 characters.');
+          return;
+        }
+        if (password != confirm) {
+          _toast('Password confirmation does not match.');
+          return;
+        }
+
+        await _service.setMemberPassword(
+          userId: targetId,
+          newPassword: password,
+        );
+        _toolPasswordCtrl.clear();
+        _toolPasswordConfirmCtrl.clear();
+        _toast('Password updated. User sessions revoked.');
+        return;
+      }
+
+      if (_toolsAction == 'Toggle block') {
+        final blocked = await _service.toggleMemberBlock(targetId);
+        _toast(blocked ? 'User blocked.' : 'User unblocked.');
+        await _loadMembers();
+        if (!mounted) return;
+        setState(() {
+          _selectedMemberId = targetId;
+          _toolsUserId = targetId;
+        });
+        return;
+      }
+
+      _toast('Unknown tools action: $_toolsAction');
+    } catch (e) {
+      _toast('Tools action failed: $e');
+    } finally {
+      if (mounted) setState(() => _toolsBusy = false);
+    }
+  }
+
+  Widget _toolsField(
+    TextEditingController controller,
+    String label, {
+    double width = 260,
+    bool obscure = false,
+  }) {
+    return SizedBox(
+      width: width,
+      child: TextField(
+        controller: controller,
+        obscureText: obscure,
+        decoration: InputDecoration(
+          labelText: label,
+          border: const OutlineInputBorder(),
+        ),
+      ),
+    );
   }
 
   Future<void> _sendGeneralPush() async {
@@ -897,8 +1075,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
-  Future<void> _loadStats() async {
-    if (_statsLoading) return;
+  Future<void> _loadStats({bool force = false}) async {
+    if (_statsLoading && !force) return;
 
     setState(() {
       _statsLoading = true;
@@ -947,17 +1125,23 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
     if (ok != true) return;
 
-    setState(() => _statsLoading = true);
+    setState(() {
+      _statsLoading = true;
+      _statsError = null;
+    });
     try {
       await _service.clearLaravelLogs();
       if (!mounted) return;
       _toast('Laravel logs cleared.');
-      await _loadStats();
     } catch (e) {
       if (!mounted) return;
       _toast('Clear logs failed: $e');
       setState(() => _statsLoading = false);
+      return;
     }
+
+    if (!mounted) return;
+    await _loadStats(force: true);
   }
 
   Future<void> _loadInvites() async {
@@ -1150,6 +1334,126 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return digits;
   }
 
+  String _defaultSupportWhatsAppMessage({String? name}) {
+    final displayName = (name ?? '').trim();
+    if (displayName.isEmpty) {
+      final msg = _whatsAppMessageDefault.trim();
+      return msg.isEmpty ? 'Hello from Weather Hooligan support.' : msg;
+    }
+
+    final template = _whatsAppMessageTemplate.trim();
+    if (template.isEmpty) {
+      return 'Hello $displayName, this is Weather Hooligan support.';
+    }
+
+    return template.replaceAll('{name}', displayName);
+  }
+
+  Future<void> _sendMemberWhatsAppViaCloud(AdminUser user) async {
+    final rawPhone = (user.whatsapp ?? '').trim();
+    final waDigits = _normalizeWhatsappDigits(rawPhone);
+    if (waDigits == null) {
+      _toast('Invalid WhatsApp number.');
+      return;
+    }
+
+    final displayName = '${user.name ?? ''} ${user.surname ?? ''}'.trim();
+    final messageCtrl = TextEditingController(
+      text: _defaultSupportWhatsAppMessage(name: displayName),
+    );
+
+    final sent = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) {
+        var sending = false;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Send WhatsApp via Cloud'),
+              content: SizedBox(
+                width: 540,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('To: ${user.username} (+$waDigits)'),
+                    const SizedBox(height: 8),
+                    const Text(
+                      'This sends through the Weather Hooligan cloud webhook channel.',
+                    ),
+                    const SizedBox(height: 12),
+                    TextField(
+                      controller: messageCtrl,
+                      enabled: !sending,
+                      minLines: 4,
+                      maxLines: 8,
+                      maxLength: 4000,
+                      decoration: const InputDecoration(
+                        labelText: 'Message',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: sending
+                      ? null
+                      : () => Navigator.of(dialogContext).pop(false),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton.icon(
+                  onPressed: sending
+                      ? null
+                      : () async {
+                          final navigator = Navigator.of(dialogContext);
+                          final body = messageCtrl.text.trim();
+                          if (body.isEmpty) {
+                            _toast('Type a message first.');
+                            return;
+                          }
+
+                          setDialogState(() => sending = true);
+                          try {
+                            await _service.sendWaMessage(
+                              waUser: waDigits,
+                              body: body,
+                            );
+                            if (!mounted) return;
+                            navigator.pop(true);
+                          } catch (e) {
+                            if (!mounted) return;
+                            _toast('Send failed: $e');
+                            setDialogState(() => sending = false);
+                          }
+                        },
+                  icon: sending
+                      ? const SizedBox(
+                          width: 16,
+                          height: 16,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.send),
+                  label: Text(sending ? 'Sending...' : 'Send'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    messageCtrl.dispose();
+
+    if (sent == true) {
+      _toast('WhatsApp sent via cloud webhook.');
+      await _waInboxKey.currentState?.refreshAll();
+    }
+  }
+
   Future<bool> _tryLaunchUri(Uri uri, {required LaunchMode mode}) async {
     try {
       return await launchUrl(uri, mode: mode);
@@ -1168,19 +1472,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       return;
     }
 
-    final displayName = (name ?? '').trim();
-    String msg;
-    if (displayName.isEmpty) {
-      msg = _whatsAppMessageDefault.trim();
-      if (msg.isEmpty) {
-        msg = 'Hello from Weather Hooligan support.';
-      }
-    } else {
-      final template = _whatsAppMessageTemplate.trim();
-      msg = template.isEmpty
-          ? 'Hello $displayName, this is Weather Hooligan support.'
-          : template.replaceAll('{name}', displayName);
-    }
+    final msg = _defaultSupportWhatsAppMessage(name: name);
     final encodedMsg = Uri.encodeQueryComponent(msg);
 
     final schemeBase = _whatsAppSchemeBase.trim().isEmpty
@@ -1250,25 +1542,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
             onDestinationSelected: (index) async {
               setState(() => _tab = index);
 
-              if (index == 2 &&
+              if (index == 2 && _members.isEmpty) {
+                await _loadMembers();
+              }
+              if (index == 3 &&
                   _appPortalAds.isEmpty &&
                   _largeAds.isEmpty &&
                   _smallAds.isEmpty) {
                 await _loadAds();
               }
-              if (index == 3 && _invites.isEmpty) {
+              if (index == 4 && _invites.isEmpty) {
                 await _loadInvites();
               }
-              if (index == 4 && _invoices.isEmpty) {
+              if (index == 5 && _invoices.isEmpty) {
                 await _loadInvoices();
               }
-              if (index == 5) {
+              if (index == 6) {
                 await _loadStats();
               }
-              if (index == 6) {
+              if (index == 7) {
                 await _waInboxKey.currentState?.refreshAll();
               }
-              if (index == 7 && _calls.isEmpty) {
+              if (index == 8 && _calls.isEmpty) {
                 await _loadWhatsAppCalls();
               }
             },
@@ -1277,6 +1572,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
               NavigationRailDestination(
                 icon: Icon(Icons.people),
                 label: Text('Members'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.build_circle_outlined),
+                label: Text('Tools'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.notifications_active),
@@ -1326,18 +1625,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
       case 0:
         return _membersTab();
       case 1:
-        return _notificationsTab();
+        return _toolsTab();
       case 2:
-        return _adsTab();
+        return _notificationsTab();
       case 3:
-        return _emailsTab();
+        return _adsTab();
       case 4:
-        return _invoicesTab();
+        return _emailsTab();
       case 5:
-        return _statsTab();
+        return _invoicesTab();
       case 6:
-        return _whatsAppInboxTab();
+        return _statsTab();
       case 7:
+        return _whatsAppInboxTab();
+      case 8:
         return _whatsAppCallsTab();
       default:
         return _membersTab();
@@ -1681,13 +1982,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
           alignment: Alignment.centerLeft,
           child: FilledButton.icon(
             onPressed: canMessageOnWhatsApp
-                ? () => _openWhatsAppChat(
-                    rawPhone: whatsappRaw,
-                    name: '${user.name ?? ''} ${user.surname ?? ''}'.trim(),
-                  )
+                ? () => _sendMemberWhatsAppViaCloud(user)
                 : null,
             icon: const Icon(Icons.chat),
-            label: const Text('WhatsApp Message'),
+            label: const Text('Send WhatsApp (Cloud)'),
           ),
         ),
         const SizedBox(height: 14),
@@ -1735,6 +2033,234 @@ class _AdminDashboardState extends State<AdminDashboard> {
             ),
           ),
       ],
+    );
+  }
+
+  Widget _toolsTab() {
+    final selectedUser = _findMemberById(_toolsUserId ?? _selectedMemberId);
+
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: ListView(
+            children: [
+              Text('Tools', style: Theme.of(context).textTheme.headlineSmall),
+              const SizedBox(height: 8),
+              const Text(
+                'Create users, set member passwords, and block/unblock members.',
+              ),
+              const SizedBox(height: 14),
+              Row(
+                children: [
+                  Expanded(
+                    child: DropdownButtonFormField<int>(
+                      initialValue: _toolsUserId ?? _selectedMemberId,
+                      decoration: const InputDecoration(
+                        labelText: 'Selected user',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: _members
+                          .map(
+                            (u) => DropdownMenuItem(
+                              value: u.id,
+                              child: Text('${u.username} • ${u.email}'),
+                            ),
+                          )
+                          .toList(),
+                      onChanged: _toolsAction == 'Create user'
+                          ? null
+                          : (value) {
+                              setState(() => _toolsUserId = value);
+                            },
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  SizedBox(
+                    width: 220,
+                    child: DropdownButtonFormField<String>(
+                      initialValue: _toolsAction,
+                      decoration: const InputDecoration(
+                        labelText: 'Action',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'Create user',
+                          child: Text('Create user'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Set password',
+                          child: Text('Set password'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'Toggle block',
+                          child: Text('Toggle block'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setState(() {
+                          _toolsAction = value;
+                          if (_toolsAction != 'Create user') {
+                            _toolsUserId ??= _selectedMemberId;
+                          }
+                        });
+                      },
+                    ),
+                  ),
+                ],
+              ),
+              if (_toolsAction != 'Create user' && selectedUser == null)
+                const Padding(
+                  padding: EdgeInsets.only(top: 12),
+                  child: Text('Select a user first.'),
+                ),
+              const SizedBox(height: 14),
+              const Divider(),
+              const SizedBox(height: 6),
+              if (_toolsAction == 'Create user') ...[
+                Text(
+                  'Create User',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    _toolsField(
+                      _toolCreateUsernameCtrl,
+                      'Username',
+                      width: 260,
+                    ),
+                    _toolsField(_toolCreateEmailCtrl, 'Email', width: 320),
+                    _toolsField(_toolCreateNameCtrl, 'Name', width: 220),
+                    _toolsField(_toolCreateSurnameCtrl, 'Surname', width: 220),
+                    _toolsField(_toolCreatePhoneCtrl, 'Phone', width: 220),
+                    _toolsField(
+                      _toolCreateWhatsAppCtrl,
+                      'WhatsApp',
+                      width: 220,
+                    ),
+                    _toolsField(_toolCreatePlanCtrl, 'Plan', width: 160),
+                    _toolsField(
+                      _toolCreatePasswordCtrl,
+                      'Password',
+                      width: 260,
+                      obscure: true,
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 4,
+                  children: [
+                    SizedBox(
+                      width: 220,
+                      child: CheckboxListTile(
+                        value: _toolCreateAndroid,
+                        onChanged: (value) {
+                          setState(() => _toolCreateAndroid = value == true);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Allow Android'),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 220,
+                      child: CheckboxListTile(
+                        value: _toolCreateWindows,
+                        onChanged: (value) {
+                          setState(() => _toolCreateWindows = value == true);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Allow Windows'),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 220,
+                      child: CheckboxListTile(
+                        value: _toolCreateWeb,
+                        onChanged: (value) {
+                          setState(() => _toolCreateWeb = value == true);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Allow Web'),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+              if (_toolsAction == 'Set password') ...[
+                Text(
+                  selectedUser == null
+                      ? 'Set Password'
+                      : 'Set Password: ${selectedUser.username}',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 10),
+                const Text(
+                  'This updates the member password and revokes existing sessions.',
+                ),
+                const SizedBox(height: 10),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 12,
+                  children: [
+                    _toolsField(
+                      _toolPasswordCtrl,
+                      'New password',
+                      width: 260,
+                      obscure: true,
+                    ),
+                    _toolsField(
+                      _toolPasswordConfirmCtrl,
+                      'Confirm password',
+                      width: 260,
+                      obscure: true,
+                    ),
+                  ],
+                ),
+              ],
+              if (_toolsAction == 'Toggle block') ...[
+                Text(
+                  selectedUser == null
+                      ? 'Toggle Block'
+                      : 'Toggle Block: ${selectedUser.username}',
+                  style: Theme.of(context).textTheme.titleLarge,
+                ),
+                const SizedBox(height: 10),
+                Text(
+                  selectedUser == null
+                      ? 'Select a user first.'
+                      : (selectedUser.isBlocked
+                            ? 'User is currently BLOCKED. Running action will unblock.'
+                            : 'User is currently ACTIVE. Running action will block.'),
+                ),
+                const SizedBox(height: 8),
+                const Text(
+                  'Current sessions are revoked when block status changes.',
+                ),
+              ],
+              const SizedBox(height: 16),
+              FilledButton.icon(
+                onPressed: _toolsBusy ? null : _runToolsAction,
+                icon: _toolsBusy
+                    ? const SizedBox(
+                        width: 16,
+                        height: 16,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.play_arrow),
+                label: Text(_toolsBusy ? 'Working...' : 'Run Action'),
+              ),
+            ],
+          ),
+        ),
+      ),
     );
   }
 
