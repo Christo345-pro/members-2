@@ -83,6 +83,8 @@ class AdminUser {
   final bool? appAndroid;
   final bool? appWindows;
   final bool? appWeb;
+  final String? appTypeRaw;
+  final String? deviceType;
 
   /// e.g. "free", "premium", "trial", or your own labels.
   final String? plan;
@@ -124,6 +126,8 @@ class AdminUser {
     this.appAndroid,
     this.appWindows,
     this.appWeb,
+    this.appTypeRaw,
+    this.deviceType,
     this.plan,
     this.isAdmin,
     required this.isBlocked,
@@ -177,6 +181,8 @@ class AdminUser {
                 ? _parseBool(json['appWindows'])
                 : null),
       appWeb: _getAppWebValue(json),
+      appTypeRaw: _readString(json['app_type_raw'] ?? json['appTypeRaw']),
+      deviceType: _readString(json['device_type'] ?? json['deviceType']),
       plan: _readString(
         json['plan'] ?? json['subscription_plan'] ?? json['tier'],
       ),
@@ -216,6 +222,7 @@ class AdminAd {
   final String? thumbUrl; // 16:9 thumb
 
   final String? linkUrl;
+  final String? placement;
   final bool active;
   final int? weight;
 
@@ -231,6 +238,7 @@ class AdminAd {
     this.smallUrl,
     this.thumbUrl,
     this.linkUrl,
+    this.placement,
     required this.active,
     this.weight,
     this.startsAt,
@@ -255,6 +263,7 @@ class AdminAd {
             j['thumbnailUrl'],
       ),
       linkUrl: _readString(j['link_url'] ?? j['linkUrl']),
+      placement: _readString(j['placement']),
       active: _parseBool(j['active']),
       weight: j['weight'] == null ? null : _parseInt(j['weight'], fallback: 0),
       startsAt: _parseDate(j['starts_at'] ?? j['startsAt']),
@@ -322,7 +331,9 @@ class AdminInvoice {
   final String currency;
   final double totalAmount;
   final String? providerKey;
+  final String? paymentMethod;
   final String? providerReference;
+  final String? billingCycle;
   final String? checkoutUrl;
   final int userId;
   final String username;
@@ -340,7 +351,9 @@ class AdminInvoice {
     required this.currency,
     required this.totalAmount,
     this.providerKey,
+    this.paymentMethod,
     this.providerReference,
+    this.billingCycle,
     this.checkoutUrl,
     required this.userId,
     required this.username,
@@ -363,9 +376,11 @@ class AdminInvoice {
       currency: (j['currency'] ?? 'ZAR').toString(),
       totalAmount: _parseDouble(j['total_amount'] ?? j['amount']) ?? 0.0,
       providerKey: _readString(j['provider_key'] ?? j['providerKey']),
+      paymentMethod: _readString(j['payment_method'] ?? j['paymentMethod']),
       providerReference: _readString(
         j['provider_reference'] ?? j['providerReference'],
       ),
+      billingCycle: _readString(j['billing_cycle'] ?? j['billingCycle']),
       checkoutUrl: _readString(j['checkout_url'] ?? j['checkoutUrl']),
       userId: _parseInt(
         userMap['id'] ?? j['user_id'] ?? j['userId'],
@@ -686,6 +701,12 @@ class UserPayment {
   final double? amount;
   final String? currency;
   final String? reference;
+  final String? providerKey;
+  final String? paymentMethod;
+  final String? providerReference;
+  final String? billingCycle;
+  final String? checkoutToken;
+  final int? totalCents;
   final String? status;
   final DateTime? paymentDate;
   final DateTime? createdAt;
@@ -694,6 +715,12 @@ class UserPayment {
     this.amount,
     this.currency,
     this.reference,
+    this.providerKey,
+    this.paymentMethod,
+    this.providerReference,
+    this.billingCycle,
+    this.checkoutToken,
+    this.totalCents,
     this.status,
     this.paymentDate,
     this.createdAt,
@@ -710,6 +737,18 @@ class UserPayment {
     reference: _readString(
       json['reference'] ?? json['ref'] ?? json['payment_reference'],
     ),
+    providerKey: _readString(json['provider_key'] ?? json['providerKey']),
+    paymentMethod: _readString(json['payment_method'] ?? json['paymentMethod']),
+    providerReference: _readString(
+      json['provider_reference'] ?? json['providerReference'],
+    ),
+    billingCycle: _readString(json['billing_cycle'] ?? json['billingCycle']),
+    checkoutToken: _readString(
+      json['checkout_token'] ?? json['checkoutToken'] ?? json['token'],
+    ),
+    totalCents: json['total_cents'] == null
+        ? null
+        : _parseInt(json['total_cents'], fallback: 0),
     status: _readString(json['status'] ?? json['state']),
     paymentDate: _parseDate(
       json['payment_date'] ?? json['paymentDate'] ?? json['date'],
@@ -857,6 +896,71 @@ class ProfileChangeRequest {
 // -----------------------------------------------------------------------------
 // System: Health / Usage / Visits
 // -----------------------------------------------------------------------------
+class AdminTrafficStats {
+  final DateTime? generatedAt;
+  final int visitorsPerMinute;
+  final int visitorsPerHour;
+  final int visitorsPer24Hours;
+  final int visitorsPerMonth;
+
+  const AdminTrafficStats({
+    this.generatedAt,
+    required this.visitorsPerMinute,
+    required this.visitorsPerHour,
+    required this.visitorsPer24Hours,
+    required this.visitorsPerMonth,
+  });
+
+  factory AdminTrafficStats.fromJson(Map<String, dynamic> json) =>
+      AdminTrafficStats(
+        generatedAt: _parseDate(json['generated_at'] ?? json['generatedAt']),
+        visitorsPerMinute: _parseInt(
+          json['visitors_per_minute'] ?? json['visitorsPerMinute'],
+        ),
+        visitorsPerHour: _parseInt(
+          json['visitors_per_hour'] ?? json['visitorsPerHour'],
+        ),
+        visitorsPer24Hours: _parseInt(
+          json['visitors_per_24_hours'] ?? json['visitorsPer24Hours'],
+        ),
+        visitorsPerMonth: _parseInt(
+          json['visitors_per_month'] ?? json['visitorsPerMonth'],
+        ),
+      );
+}
+
+class AdminLogSnapshot {
+  final DateTime? generatedAt;
+  final int lineCount;
+  final List<String> sourceFiles;
+  final List<String> lines;
+
+  const AdminLogSnapshot({
+    this.generatedAt,
+    required this.lineCount,
+    this.sourceFiles = const [],
+    this.lines = const [],
+  });
+
+  factory AdminLogSnapshot.fromJson(Map<String, dynamic> json) {
+    final rawFiles = (json['source_files'] ?? json['sourceFiles']) as List?;
+    final rawLines = (json['lines'] ?? const []) as List?;
+
+    return AdminLogSnapshot(
+      generatedAt: _parseDate(json['generated_at'] ?? json['generatedAt']),
+      lineCount: _parseInt(json['line_count'] ?? json['lineCount']),
+      sourceFiles: (rawFiles ?? const [])
+          .map((e) => e.toString().trim())
+          .where((e) => e.isNotEmpty)
+          .toList(),
+      lines: (rawLines ?? const [])
+          .map((e) => e.toString())
+          .where((e) => e.trim().isNotEmpty)
+          .toList(),
+    );
+  }
+}
+
 class HealthCheck {
   final bool ok;
   final String? error;

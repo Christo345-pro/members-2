@@ -6,8 +6,10 @@ bool get isAndroid =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.android;
 bool get isWindows =>
     !kIsWeb && defaultTargetPlatform == TargetPlatform.windows;
+bool get isLinux => !kIsWeb && defaultTargetPlatform == TargetPlatform.linux;
+bool get isMacOs => !kIsWeb && defaultTargetPlatform == TargetPlatform.macOS;
 
-bool get supportsLocalDb => false;
+bool get supportsLocalDb => isWindows || isLinux || isMacOs;
 bool get supportsAdsUpload => true;
 bool get supportsAdminPush => isAndroid;
 
