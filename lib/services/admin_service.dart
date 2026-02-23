@@ -375,6 +375,116 @@ class AdminService {
     );
   }
 
+  Future<List<AdminAd>> fetchLargeAds() async {
+    final uri = Uri.parse('$_baseUrl/api/admin/ads/large');
+    return _fetchAdminAdsFromUri(uri, contextName: 'large ads');
+  }
+
+  Future<List<AdminAd>> fetchSmallAds() async {
+    final uri = Uri.parse('$_baseUrl/api/admin/ads/small');
+    return _fetchAdminAdsFromUri(uri, contextName: 'small ads');
+  }
+
+  Future<AdminAd> uploadLargeAd({
+    required String title,
+    String? message,
+    String? linkUrl,
+    bool active = true,
+    int? weight,
+    required Uint8List imageBytes,
+    required String imageName,
+  }) async {
+    if (imageBytes.isEmpty) throw Exception('Large image file is empty.');
+    return _uploadPlacementAd(
+      endpointPath: '/api/admin/ads/large',
+      title: title,
+      message: message,
+      linkUrl: linkUrl,
+      active: active,
+      weight: weight,
+      fileField: 'large',
+      fileBytes: imageBytes,
+      fileName: imageName,
+    );
+  }
+
+  Future<AdminAd> uploadSmallAd({
+    required String title,
+    String? message,
+    String? linkUrl,
+    bool active = true,
+    int? weight,
+    required Uint8List imageBytes,
+    required String imageName,
+  }) async {
+    if (imageBytes.isEmpty) throw Exception('Small image file is empty.');
+    return _uploadPlacementAd(
+      endpointPath: '/api/admin/ads/small',
+      title: title,
+      message: message,
+      linkUrl: linkUrl,
+      active: active,
+      weight: weight,
+      fileField: 'small',
+      fileBytes: imageBytes,
+      fileName: imageName,
+    );
+  }
+
+  Future<void> deleteLargeAd(int id) async {
+    await _deletePlacementAd('/api/admin/ads/large/$id');
+  }
+
+  Future<void> deleteSmallAd(int id) async {
+    await _deletePlacementAd('/api/admin/ads/small/$id');
+  }
+
+  Future<AdminTrafficStats> fetchTrafficStats() async {
+    final uri = Uri.parse('$_baseUrl/api/admin/stats/traffic');
+
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map<String, dynamic>) {
+        return AdminTrafficStats.fromJson(body);
+      }
+      if (body is Map) {
+        return AdminTrafficStats.fromJson(body.cast<String, dynamic>());
+      }
+      throw Exception('Unexpected response format for traffic stats.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to load traffic stats (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminLogSnapshot> fetchLaravelLogs({int lines = 500}) async {
+    final safeLines = lines.clamp(20, 2000).toInt();
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/stats/logs',
+    ).replace(queryParameters: {'lines': '$safeLines'});
+
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map<String, dynamic>) {
+        return AdminLogSnapshot.fromJson(body);
+      }
+      if (body is Map) {
+        return AdminLogSnapshot.fromJson(body.cast<String, dynamic>());
+      }
+      throw Exception('Unexpected response format for Laravel logs.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to load logs (${res.statusCode}).',
+    );
+  }
+
   Future<List<AdminInvite>> fetchInvites({
     String status = 'all',
     int limit = 200,
@@ -653,6 +763,95 @@ class AdminService {
     throw Exception(
       _extractMessage(body) ??
           'Failed to update call status (${res.statusCode}).',
+    );
+  }
+
+  Future<List<AdminAd>> _fetchAdminAdsFromUri(
+    Uri uri, {
+    required String contextName,
+  }) async {
+    final res = await http.get(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is List) {
+        return body
+            .whereType<Map>()
+            .map((e) => AdminAd.fromJson(e.cast<String, dynamic>()))
+            .toList();
+      }
+      throw Exception('Unexpected response format for $contextName.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to load $contextName (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminAd> _uploadPlacementAd({
+    required String endpointPath,
+    required String title,
+    String? message,
+    String? linkUrl,
+    required bool active,
+    int? weight,
+    required String fileField,
+    required Uint8List fileBytes,
+    required String fileName,
+  }) async {
+    final t = (_token ?? '').trim();
+    if (t.isEmpty) throw Exception('No admin token set. Please login again.');
+
+    final uri = Uri.parse('$_baseUrl$endpointPath');
+    final req = http.MultipartRequest('POST', uri);
+
+    req.headers['Accept'] = 'application/json';
+    req.headers['Authorization'] = 'Bearer $t';
+
+    req.fields['title'] = title.trim();
+    if ((message ?? '').trim().isNotEmpty) {
+      req.fields['message'] = message!.trim();
+    }
+    if ((linkUrl ?? '').trim().isNotEmpty) {
+      req.fields['link_url'] = linkUrl!.trim();
+    }
+    req.fields['active'] = active ? '1' : '0';
+    if (weight != null) req.fields['weight'] = '$weight';
+
+    req.files.add(
+      http.MultipartFile.fromBytes(fileField, fileBytes, filename: fileName),
+    );
+
+    final streamed = await req.send();
+    final res = await http.Response.fromStream(streamed);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map && body['ad'] is Map) {
+        return AdminAd.fromJson((body['ad'] as Map).cast<String, dynamic>());
+      }
+      if (body is Map && body.containsKey('id')) {
+        return AdminAd.fromJson(body.cast<String, dynamic>());
+      }
+      throw Exception('Upload succeeded, but response payload unexpected.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to upload ad (${res.statusCode}).',
+    );
+  }
+
+  Future<void> _deletePlacementAd(String endpointPath) async {
+    final uri = Uri.parse('$_baseUrl$endpointPath');
+
+    final res = await http.delete(uri, headers: _headers()).timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) return;
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to delete ad (${res.statusCode}).',
     );
   }
 

@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:path/path.dart' as p;
@@ -28,9 +29,7 @@ class LocalMemberDb {
       databaseFactory = databaseFactoryFfi;
     }
 
-    final baseDir = await getApplicationSupportDirectory();
-    await baseDir.create(recursive: true);
-    final dbPath = p.join(baseDir.path, 'members.db');
+    final dbPath = await _resolveDatabasePath();
 
     return openDatabase(
       dbPath,
@@ -77,6 +76,14 @@ class LocalMemberDb {
       },
     );
   }
+
+  Future<String> _resolveDatabasePath() async {
+    final baseDir = await getApplicationSupportDirectory();
+    await baseDir.create(recursive: true);
+    return p.join(baseDir.path, 'members.db');
+  }
+
+  Future<String> databasePath() => _resolveDatabasePath();
 
   Future<void> close() async {
     final db = _db;
@@ -187,5 +194,24 @@ class LocalMemberDb {
         whereArgs: serverIds,
       );
     });
+  }
+
+  Future<String> exportJsonSnapshot() async {
+    final rows = await getMembers(includeDeleted: false);
+    final dbPath = await _resolveDatabasePath();
+    final exportDir = Directory(p.join(p.dirname(dbPath), 'exports'));
+    await exportDir.create(recursive: true);
+
+    final timestamp = DateTime.now().toIso8601String().replaceAll(':', '-');
+    final path = p.join(exportDir.path, 'members_export_$timestamp.json');
+    final payload = <String, dynamic>{
+      'generated_at': DateTime.now().toIso8601String(),
+      'database_path': dbPath,
+      'count': rows.length,
+      'members': rows.map((e) => e.toJson()).toList(),
+    };
+
+    await File(path).writeAsString(jsonEncode(payload), flush: true);
+    return path;
   }
 }

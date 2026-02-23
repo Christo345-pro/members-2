@@ -7,6 +7,8 @@ import '../models/admin_models.dart';
 import '../platform/platform_features.dart';
 import '../screens/whatsapp_messages_panel.dart';
 import '../services/admin_service.dart';
+import '../services/local_member_db_stub.dart'
+    if (dart.library.io) '../services/local_member_db.dart';
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -49,19 +51,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
   AdminUser? _memberDetail;
 
   final _memberSearchCtrl = TextEditingController();
+  final _memberNameCtrl = TextEditingController();
+  final _memberAccountCtrl = TextEditingController();
+  final _memberEmailCtrl = TextEditingController();
+  final _memberDateCtrl = TextEditingController();
+  String _memberPlanFilter = 'all';
 
   bool _pushSending = false;
   final _pushMessageCtrl = TextEditingController();
 
   bool _adsLoading = false;
   String? _adsError;
-  List<AdminAd> _ads = [];
+  List<AdminAd> _appPortalAds = [];
+  List<AdminAd> _largeAds = [];
+  List<AdminAd> _smallAds = [];
 
   bool _invitesLoading = false;
   bool _inviteSending = false;
   String? _invitesError;
   List<AdminInvite> _invites = [];
   String _inviteStatus = 'all';
+  final _inviteSearchCtrl = TextEditingController();
+  final _inviteDateCtrl = TextEditingController();
 
   final _inviteNameCtrl = TextEditingController();
   final _inviteSurnameCtrl = TextEditingController();
@@ -73,6 +84,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
   List<AdminInvoice> _invoices = [];
   String _invoiceStatus = 'all';
   bool _invoiceSelectedMemberOnly = false;
+  final _invoiceSearchCtrl = TextEditingController();
+  final _invoiceDateCtrl = TextEditingController();
+  String _invoiceMethodFilter = 'all';
 
   bool _callsLoading = false;
   String? _callsError;
@@ -83,21 +97,51 @@ class _AdminDashboardState extends State<AdminDashboard> {
   int? _updatingCallId;
   final _callsSearchCtrl = TextEditingController();
 
+  bool _statsLoading = false;
+  String? _statsError;
+  AdminTrafficStats? _trafficStats;
+  AdminLogSnapshot? _logSnapshot;
+  int _logLineLimit = 400;
+  final _statsSearchCtrl = TextEditingController();
+  final _statsDateCtrl = TextEditingController();
+  String _statsLevelFilter = 'all';
+
+  final _adsSearchCtrl = TextEditingController();
+
+  bool _localDbSyncing = false;
+  String? _localDbError;
+  String? _localDbPath;
+  int _localDbCount = 0;
+
   @override
   void initState() {
     super.initState();
     _loadMembers();
+    if (supportsLocalDb) {
+      _refreshLocalDbSummary();
+    }
   }
 
   @override
   void dispose() {
     _memberSearchCtrl.dispose();
+    _memberNameCtrl.dispose();
+    _memberAccountCtrl.dispose();
+    _memberEmailCtrl.dispose();
+    _memberDateCtrl.dispose();
     _pushMessageCtrl.dispose();
+    _adsSearchCtrl.dispose();
 
+    _inviteSearchCtrl.dispose();
+    _inviteDateCtrl.dispose();
     _inviteNameCtrl.dispose();
     _inviteSurnameCtrl.dispose();
     _inviteEmailCtrl.dispose();
     _inviteWhatsappCtrl.dispose();
+    _invoiceSearchCtrl.dispose();
+    _invoiceDateCtrl.dispose();
+    _statsSearchCtrl.dispose();
+    _statsDateCtrl.dispose();
     _callsSearchCtrl.dispose();
 
     super.dispose();
@@ -113,6 +157,45 @@ class _AdminDashboardState extends State<AdminDashboard> {
   String _fmtDate(DateTime? dt) {
     if (dt == null) return '—';
     return dt.toLocal().toString().split('.').first;
+  }
+
+  bool _containsText(String? value, String needle) {
+    final hay = (value ?? '').toLowerCase();
+    final token = needle.trim().toLowerCase();
+    if (token.isEmpty) return true;
+    return hay.contains(token);
+  }
+
+  bool _dateMatches(DateTime? dt, String token) {
+    final value = token.trim().toLowerCase();
+    if (value.isEmpty) return true;
+    if (dt == null) return false;
+
+    final iso = dt.toIso8601String().toLowerCase();
+    final local = _fmtDate(dt).toLowerCase();
+    final compact = iso.split('t').first;
+    return iso.contains(value) ||
+        local.contains(value) ||
+        compact.contains(value);
+  }
+
+  bool _logMatchesLevel(String line, String level) {
+    final value = line.toLowerCase();
+    switch (level) {
+      case 'error':
+        return value.contains('.error') ||
+            value.contains(' error ') ||
+            value.contains('exception') ||
+            value.contains('fatal');
+      case 'warning':
+        return value.contains('.warning') || value.contains(' warning ');
+      case 'info':
+        return value.contains('.info') || value.contains(' info ');
+      case 'debug':
+        return value.contains('.debug') || value.contains(' debug ');
+      default:
+        return true;
+    }
   }
 
   Future<void> _logout() async {
@@ -147,9 +230,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
         await _loadInvoices();
         break;
       case 5:
-        await _waInboxKey.currentState?.refreshAll();
+        await _loadStats();
         break;
       case 6:
+        await _waInboxKey.currentState?.refreshAll();
+        break;
+      case 7:
         await _loadWhatsAppCalls();
         break;
     }
@@ -170,6 +256,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       );
 
       _members = list;
+      await _syncMembersToLocalDb(list);
 
       if (_members.isEmpty) {
         if (!mounted) return;
@@ -196,6 +283,61 @@ class _AdminDashboardState extends State<AdminDashboard> {
       setState(() => _membersError = e.toString());
     } finally {
       if (mounted) setState(() => _membersLoading = false);
+    }
+  }
+
+  Future<void> _syncMembersToLocalDb(List<AdminUser> users) async {
+    if (!supportsLocalDb) return;
+
+    if (mounted) {
+      setState(() {
+        _localDbSyncing = true;
+        _localDbError = null;
+      });
+    }
+
+    try {
+      await LocalMemberDb.instance.syncFromAdminUsers(users);
+      await _refreshLocalDbSummary();
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _localDbError = e.toString());
+    } finally {
+      if (mounted) setState(() => _localDbSyncing = false);
+    }
+  }
+
+  Future<void> _refreshLocalDbSummary() async {
+    if (!supportsLocalDb) return;
+
+    final members = await LocalMemberDb.instance.getMembers();
+    final path = await LocalMemberDb.instance.databasePath();
+
+    if (!mounted) return;
+    setState(() {
+      _localDbCount = members.length;
+      _localDbPath = path;
+    });
+  }
+
+  Future<void> _exportLocalDbJson() async {
+    if (!supportsLocalDb || _localDbSyncing) return;
+
+    setState(() {
+      _localDbSyncing = true;
+      _localDbError = null;
+    });
+
+    try {
+      final path = await LocalMemberDb.instance.exportJsonSnapshot();
+      if (!mounted) return;
+      _toast('Customer export created: $path');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _localDbError = e.toString());
+      _toast('Export failed: $e');
+    } finally {
+      if (mounted) setState(() => _localDbSyncing = false);
     }
   }
 
@@ -248,9 +390,18 @@ class _AdminDashboardState extends State<AdminDashboard> {
     });
 
     try {
-      final list = await _service.fetchAds();
+      final appPortalFuture = _service.fetchAds();
+      final largeFuture = _service.fetchLargeAds();
+      final smallFuture = _service.fetchSmallAds();
+      final appPortal = await appPortalFuture;
+      final large = await largeFuture;
+      final small = await smallFuture;
       if (!mounted) return;
-      setState(() => _ads = list);
+      setState(() {
+        _appPortalAds = appPortal;
+        _largeAds = large;
+        _smallAds = small;
+      });
     } catch (e) {
       if (!mounted) return;
       setState(() => _adsError = e.toString());
@@ -268,12 +419,16 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return res?.files.single;
   }
 
-  Future<void> _deleteAd(AdminAd ad) async {
+  Future<void> _deletePlacementAd({
+    required AdminAd ad,
+    required String placementLabel,
+    required Future<void> Function(int id) deleteAction,
+  }) async {
     final ok = await showDialog<bool>(
       context: context,
       builder: (_) => AlertDialog(
         title: const Text('Delete ad?'),
-        content: Text('Delete "${ad.title}" permanently?'),
+        content: Text('Delete $placementLabel ad "${ad.title}" permanently?'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
@@ -291,25 +446,48 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
     setState(() => _adsLoading = true);
     try {
-      await _service.deleteAd(ad.id);
+      await deleteAction(ad.id);
       await _loadAds();
-      _toast('Ad deleted.');
+      _toast('$placementLabel ad deleted.');
     } catch (e) {
       _toast('Delete failed: $e');
       if (mounted) setState(() => _adsLoading = false);
     }
   }
 
-  Future<void> _openUploadAdDialog() async {
+  Future<void> _deleteLargeAd(AdminAd ad) async {
+    await _deletePlacementAd(
+      ad: ad,
+      placementLabel: 'large',
+      deleteAction: _service.deleteLargeAd,
+    );
+  }
+
+  Future<void> _deleteSmallAd(AdminAd ad) async {
+    await _deletePlacementAd(
+      ad: ad,
+      placementLabel: 'small',
+      deleteAction: _service.deleteSmallAd,
+    );
+  }
+
+  Future<void> _openUploadLargeAdDialog() async {
+    await _openUploadPlacementAdDialog(isLarge: true);
+  }
+
+  Future<void> _openUploadSmallAdDialog() async {
+    await _openUploadPlacementAdDialog(isLarge: false);
+  }
+
+  Future<void> _openUploadPlacementAdDialog({required bool isLarge}) async {
     final titleCtrl = TextEditingController();
     final msgCtrl = TextEditingController();
     final linkCtrl = TextEditingController();
     final weightCtrl = TextEditingController();
 
     bool active = true;
-    PlatformFile? largeImage;
-    PlatformFile? smallWebImage;
-    PlatformFile? thumbImage;
+    PlatformFile? imageFile;
+    final placementLabel = isLarge ? 'Large' : 'Small';
 
     final ok = await showDialog<bool>(
       context: context,
@@ -319,7 +497,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
               f == null ? '(not selected)' : f.name;
 
           return AlertDialog(
-            title: const Text('Upload Advertisement'),
+            title: Text('Upload $placementLabel Advertisement'),
             content: SizedBox(
               width: 560,
               child: SingleChildScrollView(
@@ -376,29 +554,17 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     const Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Upload specs:',
+                        'Upload specs',
                         style: TextStyle(fontWeight: FontWeight.w700),
                       ),
                     ),
                     const SizedBox(height: 6),
-                    const Align(
+                    Align(
                       alignment: Alignment.centerLeft,
                       child: Text(
-                        'Large ad (required, full/open view): 1920x1080 (16:9) preferred, minimum 1600x900.',
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Small web ad (homepage strips, app shell web strips): 1366x768 preferred, minimum 960x540.',
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    const Align(
-                      alignment: Alignment.centerLeft,
-                      child: Text(
-                        'Card/thumb ad (required, Ads tab cards): 1280x720 (16:9) preferred, minimum 960x540.',
+                        isLarge
+                            ? 'Large ad for main/login/about rotobox: 1920x1080 preferred (minimum 1600x900).'
+                            : 'Small ad for features/pricing/contact/signup/register rotobox: 1366x768 preferred (minimum 960x540).',
                       ),
                     ),
                     const Divider(height: 20),
@@ -407,7 +573,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       children: [
                         Expanded(
                           child: Text(
-                            'Large image (homepage): ${fileName(largeImage)}',
+                            '$placementLabel image: ${fileName(imageFile)}',
                             overflow: TextOverflow.ellipsis,
                           ),
                         ),
@@ -416,49 +582,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           onPressed: () async {
                             final f = await _pickImageFile();
                             if (f == null) return;
-                            setLocal(() => largeImage = f);
+                            setLocal(() => imageFile = f);
                           },
-                          child: const Text('Pick Large'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Small web image: ${fileName(smallWebImage)}',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: () async {
-                            final f = await _pickImageFile();
-                            if (f == null) return;
-                            setLocal(() => smallWebImage = f);
-                          },
-                          child: const Text('Pick Small'),
-                        ),
-                      ],
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: Text(
-                            'Card/thumb image: ${fileName(thumbImage)}',
-                            overflow: TextOverflow.ellipsis,
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        OutlinedButton(
-                          onPressed: () async {
-                            final f = await _pickImageFile();
-                            if (f == null) return;
-                            setLocal(() => thumbImage = f);
-                          },
-                          child: const Text('Pick Thumb'),
+                          child: Text('Pick $placementLabel'),
                         ),
                       ],
                     ),
@@ -479,11 +605,243 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     );
                     return;
                   }
-                  if (largeImage == null || largeImage?.bytes == null) {
+                  if (imageFile == null || imageFile?.bytes == null) {
                     ScaffoldMessenger.of(ctx).showSnackBar(
-                      const SnackBar(
-                        content: Text('Pick the large homepage image.'),
+                      SnackBar(
+                        content: Text('Pick the $placementLabel image.'),
                       ),
+                    );
+                    return;
+                  }
+                  Navigator.pop(ctx, true);
+                },
+                child: const Text('Upload'),
+              ),
+            ],
+          );
+        },
+      ),
+    );
+
+    if (ok != true) {
+      titleCtrl.dispose();
+      msgCtrl.dispose();
+      linkCtrl.dispose();
+      weightCtrl.dispose();
+      return;
+    }
+
+    setState(() => _adsLoading = true);
+    try {
+      if (isLarge) {
+        await _service.uploadLargeAd(
+          title: titleCtrl.text.trim(),
+          message: msgCtrl.text.trim().isEmpty ? null : msgCtrl.text.trim(),
+          linkUrl: linkCtrl.text.trim().isEmpty ? null : linkCtrl.text.trim(),
+          active: active,
+          weight: int.tryParse(weightCtrl.text.trim()),
+          imageBytes: imageFile!.bytes!,
+          imageName: imageFile!.name,
+        );
+      } else {
+        await _service.uploadSmallAd(
+          title: titleCtrl.text.trim(),
+          message: msgCtrl.text.trim().isEmpty ? null : msgCtrl.text.trim(),
+          linkUrl: linkCtrl.text.trim().isEmpty ? null : linkCtrl.text.trim(),
+          active: active,
+          weight: int.tryParse(weightCtrl.text.trim()),
+          imageBytes: imageFile!.bytes!,
+          imageName: imageFile!.name,
+        );
+      }
+      await _loadAds();
+      _toast('$placementLabel ad uploaded.');
+    } catch (e) {
+      _toast('Upload failed: $e');
+      if (mounted) setState(() => _adsLoading = false);
+    } finally {
+      titleCtrl.dispose();
+      msgCtrl.dispose();
+      linkCtrl.dispose();
+      weightCtrl.dispose();
+    }
+  }
+
+  Future<void> _deleteAppPortalAd(AdminAd ad) async {
+    await _deletePlacementAd(
+      ad: ad,
+      placementLabel: 'app/portal',
+      deleteAction: _service.deleteAd,
+    );
+  }
+
+  Future<void> _openUploadAppPortalAdDialog() async {
+    final titleCtrl = TextEditingController();
+    final msgCtrl = TextEditingController();
+    final linkCtrl = TextEditingController();
+    final weightCtrl = TextEditingController();
+
+    bool active = true;
+    PlatformFile? fullImage;
+    PlatformFile? thumbImage;
+    PlatformFile? smallImage;
+
+    final ok = await showDialog<bool>(
+      context: context,
+      builder: (_) => StatefulBuilder(
+        builder: (ctx, setLocal) {
+          String fileName(PlatformFile? f) =>
+              f == null ? '(not selected)' : f.name;
+
+          return AlertDialog(
+            title: const Text('Upload App + Portal Ad (Full + Thumb)'),
+            content: SizedBox(
+              width: 600,
+              child: SingleChildScrollView(
+                child: Column(
+                  children: [
+                    TextField(
+                      controller: titleCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Title',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: msgCtrl,
+                      maxLines: 3,
+                      decoration: const InputDecoration(
+                        labelText: 'Message (optional)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    TextField(
+                      controller: linkCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Link URL (optional)',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                    const SizedBox(height: 10),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: weightCtrl,
+                            keyboardType: TextInputType.number,
+                            decoration: const InputDecoration(
+                              labelText: 'Weight (optional)',
+                              border: OutlineInputBorder(),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 10),
+                        Expanded(
+                          child: SwitchListTile(
+                            value: active,
+                            onChanged: (v) => setLocal(() => active = v),
+                            title: const Text('Active'),
+                          ),
+                        ),
+                      ],
+                    ),
+                    const Divider(height: 20),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Full + Thumb are used by the user app and portal.',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                    ),
+                    const SizedBox(height: 6),
+                    const Align(
+                      alignment: Alignment.centerLeft,
+                      child: Text(
+                        'Full: required • Thumb: required • Small: optional fallback.',
+                      ),
+                    ),
+                    const Divider(height: 20),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Full image: ${fileName(fullImage)}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () async {
+                            final f = await _pickImageFile();
+                            if (f == null) return;
+                            setLocal(() => fullImage = f);
+                          },
+                          child: const Text('Pick Full'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Thumb image: ${fileName(thumbImage)}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () async {
+                            final f = await _pickImageFile();
+                            if (f == null) return;
+                            setLocal(() => thumbImage = f);
+                          },
+                          child: const Text('Pick Thumb'),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Text(
+                            'Small image (optional): ${fileName(smallImage)}',
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        OutlinedButton(
+                          onPressed: () async {
+                            final f = await _pickImageFile();
+                            if (f == null) return;
+                            setLocal(() => smallImage = f);
+                          },
+                          child: const Text('Pick Small'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(ctx, false),
+                child: const Text('Cancel'),
+              ),
+              FilledButton(
+                onPressed: () {
+                  if (titleCtrl.text.trim().isEmpty) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(content: Text('Title is required.')),
+                    );
+                    return;
+                  }
+                  if (fullImage == null || fullImage?.bytes == null) {
+                    ScaffoldMessenger.of(ctx).showSnackBar(
+                      const SnackBar(content: Text('Pick the full image.')),
                     );
                     return;
                   }
@@ -519,15 +877,15 @@ class _AdminDashboardState extends State<AdminDashboard> {
         linkUrl: linkCtrl.text.trim().isEmpty ? null : linkCtrl.text.trim(),
         active: active,
         weight: int.tryParse(weightCtrl.text.trim()),
-        imageBytes: largeImage!.bytes!,
-        imageName: largeImage!.name,
-        smallBytes: smallWebImage?.bytes,
-        smallName: smallWebImage?.name,
+        imageBytes: fullImage!.bytes!,
+        imageName: fullImage!.name,
+        smallBytes: smallImage?.bytes,
+        smallName: smallImage?.name,
         thumbBytes: thumbImage!.bytes!,
         thumbName: thumbImage!.name,
       );
       await _loadAds();
-      _toast('Ad uploaded.');
+      _toast('App + portal ad uploaded.');
     } catch (e) {
       _toast('Upload failed: $e');
       if (mounted) setState(() => _adsLoading = false);
@@ -536,6 +894,33 @@ class _AdminDashboardState extends State<AdminDashboard> {
       msgCtrl.dispose();
       linkCtrl.dispose();
       weightCtrl.dispose();
+    }
+  }
+
+  Future<void> _loadStats() async {
+    if (_statsLoading) return;
+
+    setState(() {
+      _statsLoading = true;
+      _statsError = null;
+    });
+
+    try {
+      final trafficFuture = _service.fetchTrafficStats();
+      final logsFuture = _service.fetchLaravelLogs(lines: _logLineLimit);
+      final traffic = await trafficFuture;
+      final logs = await logsFuture;
+
+      if (!mounted) return;
+      setState(() {
+        _trafficStats = traffic;
+        _logSnapshot = logs;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _statsError = e.toString());
+    } finally {
+      if (mounted) setState(() => _statsLoading = false);
     }
   }
 
@@ -829,7 +1214,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
             onDestinationSelected: (index) async {
               setState(() => _tab = index);
 
-              if (index == 2 && _ads.isEmpty) {
+              if (index == 2 &&
+                  _appPortalAds.isEmpty &&
+                  _largeAds.isEmpty &&
+                  _smallAds.isEmpty) {
                 await _loadAds();
               }
               if (index == 3 && _invites.isEmpty) {
@@ -839,9 +1227,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 await _loadInvoices();
               }
               if (index == 5) {
+                await _loadStats();
+              }
+              if (index == 6) {
                 await _waInboxKey.currentState?.refreshAll();
               }
-              if (index == 6 && _calls.isEmpty) {
+              if (index == 7 && _calls.isEmpty) {
                 await _loadWhatsAppCalls();
               }
             },
@@ -866,6 +1257,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
               NavigationRailDestination(
                 icon: Icon(Icons.receipt_long),
                 label: Text('Invoices'),
+              ),
+              NavigationRailDestination(
+                icon: Icon(Icons.query_stats),
+                label: Text('Stats'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.forum),
@@ -903,8 +1298,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
       case 4:
         return _invoicesTab();
       case 5:
-        return _whatsAppInboxTab();
+        return _statsTab();
       case 6:
+        return _whatsAppInboxTab();
+      case 7:
         return _whatsAppCallsTab();
       default:
         return _membersTab();
@@ -913,33 +1310,61 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   Widget _membersTab() {
     final query = _memberSearchCtrl.text.trim().toLowerCase();
+    final nameFilter = _memberNameCtrl.text.trim().toLowerCase();
+    final accountFilter = _memberAccountCtrl.text.trim().toLowerCase();
+    final emailFilter = _memberEmailCtrl.text.trim().toLowerCase();
+    final dateFilter = _memberDateCtrl.text.trim().toLowerCase();
 
-    final visible = query.isEmpty
-        ? _members
-        : _members.where((u) {
-            final hay = [
-              u.username,
-              u.name ?? '',
-              u.surname ?? '',
-              u.email,
-              u.accountNumber ?? '',
-              u.whatsapp ?? '',
-              u.phone ?? '',
-            ].join(' ').toLowerCase();
-            return hay.contains(query);
-          }).toList();
+    final visible = _members.where((u) {
+      final fullName = '${u.name ?? ''} ${u.surname ?? ''}'.trim();
+      final accountType = (u.plan ?? '').trim().toLowerCase();
+      final genericHay = [
+        u.username,
+        fullName,
+        u.email,
+        u.accountNumber ?? '',
+        u.whatsapp ?? '',
+        u.phone ?? '',
+        accountType,
+      ].join(' ').toLowerCase();
+
+      if (query.isNotEmpty && !genericHay.contains(query)) return false;
+      if (nameFilter.isNotEmpty &&
+          !_containsText('${u.username} $fullName', nameFilter)) {
+        return false;
+      }
+      if (accountFilter.isNotEmpty &&
+          !_containsText(u.accountNumber, accountFilter)) {
+        return false;
+      }
+      if (emailFilter.isNotEmpty && !_containsText(u.email, emailFilter)) {
+        return false;
+      }
+      if (dateFilter.isNotEmpty && !_dateMatches(u.createdAt, dateFilter)) {
+        return false;
+      }
+      if (_memberPlanFilter != 'all' &&
+          accountType != _memberPlanFilter.trim().toLowerCase()) {
+        return false;
+      }
+
+      return true;
+    }).toList();
 
     return Row(
       children: [
         SizedBox(
-          width: 360,
+          width: 470,
           child: Card(
             margin: const EdgeInsets.all(12),
             child: Column(
               children: [
                 ListTile(
                   title: const Text('Members'),
-                  subtitle: Text('${visible.length} shown'),
+                  subtitle: Text(
+                    '${visible.length} shown'
+                    '${_members.length == visible.length ? '' : ' / ${_members.length} total'}',
+                  ),
                   trailing: IconButton(
                     onPressed: _loadMembers,
                     icon: const Icon(Icons.refresh),
@@ -965,6 +1390,158 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     onSubmitted: (_) => _loadMembers(),
                   ),
                 ),
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                  child: Wrap(
+                    spacing: 8,
+                    runSpacing: 8,
+                    children: [
+                      SizedBox(
+                        width: 210,
+                        child: TextField(
+                          controller: _memberNameCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Name / Username',
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 210,
+                        child: TextField(
+                          controller: _memberAccountCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Account Number',
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 210,
+                        child: TextField(
+                          controller: _memberEmailCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Email Address',
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 140,
+                        child: TextField(
+                          controller: _memberDateCtrl,
+                          decoration: const InputDecoration(
+                            labelText: 'Date (YYYY-MM-DD)',
+                            border: OutlineInputBorder(),
+                          ),
+                          onChanged: (_) => setState(() {}),
+                        ),
+                      ),
+                      SizedBox(
+                        width: 130,
+                        child: DropdownButtonFormField<String>(
+                          value: _memberPlanFilter,
+                          decoration: const InputDecoration(
+                            labelText: 'Account Type',
+                            border: OutlineInputBorder(),
+                          ),
+                          items: const [
+                            DropdownMenuItem(value: 'all', child: Text('All')),
+                            DropdownMenuItem(
+                              value: 'free',
+                              child: Text('Free'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'premium',
+                              child: Text('Premium'),
+                            ),
+                            DropdownMenuItem(
+                              value: 'trial',
+                              child: Text('Trial'),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            if (value == null) return;
+                            setState(() => _memberPlanFilter = value);
+                          },
+                        ),
+                      ),
+                      OutlinedButton.icon(
+                        onPressed: () {
+                          _memberSearchCtrl.clear();
+                          _memberNameCtrl.clear();
+                          _memberAccountCtrl.clear();
+                          _memberEmailCtrl.clear();
+                          _memberDateCtrl.clear();
+                          setState(() => _memberPlanFilter = 'all');
+                        },
+                        icon: const Icon(Icons.clear_all),
+                        label: const Text('Clear Filters'),
+                      ),
+                    ],
+                  ),
+                ),
+                if (supportsLocalDb)
+                  Padding(
+                    padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+                    child: Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(10),
+                      decoration: BoxDecoration(
+                        borderRadius: BorderRadius.circular(10),
+                        border: Border.all(color: Colors.white24),
+                        color: Colors.black12,
+                      ),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Row(
+                            children: [
+                              const Expanded(
+                                child: Text(
+                                  'Local Customer DB',
+                                  style: TextStyle(fontWeight: FontWeight.w700),
+                                ),
+                              ),
+                              TextButton(
+                                onPressed: _localDbSyncing
+                                    ? null
+                                    : () => _syncMembersToLocalDb(_members),
+                                child: const Text('Sync'),
+                              ),
+                              TextButton(
+                                onPressed: _localDbSyncing
+                                    ? null
+                                    : _exportLocalDbJson,
+                                child: const Text('Export JSON'),
+                              ),
+                            ],
+                          ),
+                          Text('Customers in local DB: $_localDbCount'),
+                          Text('DB path: ${_localDbPath ?? 'Loading...'}'),
+                          if (_localDbSyncing)
+                            const Padding(
+                              padding: EdgeInsets.only(top: 4),
+                              child: LinearProgressIndicator(minHeight: 2),
+                            ),
+                          if ((_localDbError ?? '').trim().isNotEmpty)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 6),
+                              child: Text(
+                                'Error: $_localDbError',
+                                style: const TextStyle(
+                                  color: Colors.redAccent,
+                                  fontSize: 12,
+                                ),
+                              ),
+                            ),
+                        ],
+                      ),
+                    ),
+                  ),
                 const Divider(height: 1),
                 Expanded(
                   child: ListView.builder(
@@ -1050,6 +1627,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
             _info('Plan', user.plan ?? '—'),
             _info('Phone', user.phone ?? '—'),
             _info('WhatsApp', user.whatsapp ?? '—'),
+            _info('Device Type', user.deviceType ?? 'Unknown'),
+            _info('App Type Raw', user.appTypeRaw ?? '—'),
             _info('Created', _fmtDate(user.createdAt)),
           ],
         ),
@@ -1102,7 +1681,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
               title: Text(
                 '${p.amount?.toStringAsFixed(2) ?? '0.00'} ${p.currency ?? 'ZAR'}',
               ),
-              subtitle: Text('Ref: ${p.reference ?? '—'} • ${p.status ?? '—'}'),
+              subtitle: Text(
+                'Method: ${p.paymentMethod ?? p.providerKey ?? 'Unknown'} • Status: ${p.status ?? '—'}\n'
+                'Ref: ${p.providerReference ?? p.reference ?? p.checkoutToken ?? '—'}'
+                '${(p.billingCycle ?? '').trim().isEmpty ? '' : ' • Cycle: ${p.billingCycle}'}',
+              ),
+              isThreeLine: true,
               trailing: Text(_fmtDate(p.paymentDate ?? p.createdAt)),
             ),
           ),
@@ -1167,6 +1751,26 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Widget _adsTab() {
+    final adsQuery = _adsSearchCtrl.text.trim().toLowerCase();
+
+    List<AdminAd> filterAds(List<AdminAd> rows) {
+      if (adsQuery.isEmpty) return rows;
+      return rows.where((ad) {
+        final hay = [
+          ad.title,
+          ad.message ?? '',
+          ad.linkUrl ?? '',
+          ad.placement ?? '',
+          _fmtDate(ad.createdAt),
+        ].join(' ').toLowerCase();
+        return hay.contains(adsQuery);
+      }).toList();
+    }
+
+    final appPortalVisible = filterAds(_appPortalAds);
+    final largeVisible = filterAds(_largeAds);
+    final smallVisible = filterAds(_smallAds);
+
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Card(
@@ -1188,13 +1792,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     label: const Text('Refresh'),
                   ),
                   const SizedBox(width: 10),
-                  FilledButton.icon(
-                    onPressed: (!supportsAdsUpload || _adsLoading)
-                        ? null
-                        : _openUploadAdDialog,
-                    icon: const Icon(Icons.upload),
-                    label: const Text('Upload'),
-                  ),
                 ],
               ),
               if (!supportsAdsUpload) ...[
@@ -1217,21 +1814,40 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      'Ad upload resolutions',
+                      'Ad controllers',
                       style: TextStyle(fontWeight: FontWeight.w700),
                     ),
                     SizedBox(height: 4),
                     Text(
-                      'Large (required, full/open view): 1920x1080 preferred, minimum 1600x900.',
+                      'App + Portal ads: full + thumb flow (legacy /api/ads).',
                     ),
                     Text(
-                      'Small web (recommended, homepage + app shell strips): 1366x768 preferred, minimum 960x540.',
+                      'Large ads: main/login/about rotobox (independent from thumb/small images).',
                     ),
                     Text(
-                      'Card/Thumb (required, Ads tab cards): 1280x720 preferred, minimum 960x540.',
+                      'Small ads: features/pricing/contact/signup/register rotobox.',
                     ),
                   ],
                 ),
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _adsSearchCtrl,
+                decoration: InputDecoration(
+                  labelText: 'Search ads (title/message/link/date)',
+                  border: const OutlineInputBorder(),
+                  prefixIcon: const Icon(Icons.search),
+                  suffixIcon: _adsSearchCtrl.text.trim().isEmpty
+                      ? null
+                      : IconButton(
+                          onPressed: () {
+                            _adsSearchCtrl.clear();
+                            setState(() {});
+                          },
+                          icon: const Icon(Icons.clear),
+                        ),
+                ),
+                onChanged: (_) => setState(() {}),
               ),
               const SizedBox(height: 12),
               const Divider(),
@@ -1240,34 +1856,86 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     ? const Center(child: CircularProgressIndicator())
                     : _adsError != null
                     ? Center(child: Text('Error: $_adsError'))
-                    : _ads.isEmpty
-                    ? const Center(child: Text('No ads available.'))
-                    : ListView.separated(
-                        itemCount: _ads.length,
-                        separatorBuilder: (_, index) =>
-                            const Divider(height: 1),
-                        itemBuilder: (_, i) {
-                          final ad = _ads[i];
-                          final image = (ad.thumbUrl ?? ad.imageUrl ?? '')
-                              .trim();
-                          return ListTile(
-                            leading: _thumb(image),
-                            title: Text(ad.title),
-                            subtitle: Text(
-                              '${ad.active ? 'ACTIVE' : 'INACTIVE'} • ${_fmtDate(ad.createdAt)}',
-                            ),
-                            trailing: IconButton(
-                              onPressed: _adsLoading
-                                  ? null
-                                  : () => _deleteAd(ad),
-                              icon: const Icon(
-                                Icons.delete,
-                                color: Colors.redAccent,
-                              ),
-                            ),
-                            onTap: image.isEmpty
-                                ? null
-                                : () => _openAdPreview(ad, image),
+                    : LayoutBuilder(
+                        builder: (context, constraints) {
+                          final threeColumns = constraints.maxWidth >= 1550;
+                          final twoColumns = constraints.maxWidth >= 1100;
+
+                          final appPortalPanel = _adPlacementPanel(
+                            title: 'App + Portal Ads',
+                            subtitle:
+                                'User app + portal.weather-hooligan.co.za',
+                            ads: appPortalVisible,
+                            onUpload: supportsAdsUpload && !_adsLoading
+                                ? _openUploadAppPortalAdDialog
+                                : null,
+                            onDelete: _deleteAppPortalAd,
+                            imageForTile: (ad) =>
+                                (ad.thumbUrl ?? ad.imageUrl ?? '').trim(),
+                          );
+
+                          final largePanel = _adPlacementPanel(
+                            title: 'Large Ads',
+                            subtitle: 'Used on main/login/about',
+                            ads: largeVisible,
+                            onUpload: supportsAdsUpload && !_adsLoading
+                                ? _openUploadLargeAdDialog
+                                : null,
+                            onDelete: _deleteLargeAd,
+                            imageForTile: (ad) => (ad.imageUrl ?? '').trim(),
+                          );
+
+                          final smallPanel = _adPlacementPanel(
+                            title: 'Small Ads',
+                            subtitle:
+                                'Used on features/pricing/contact/signup/register',
+                            ads: smallVisible,
+                            onUpload: supportsAdsUpload && !_adsLoading
+                                ? _openUploadSmallAdDialog
+                                : null,
+                            onDelete: _deleteSmallAd,
+                            imageForTile: (ad) =>
+                                (ad.smallUrl ?? ad.imageUrl ?? '').trim(),
+                          );
+
+                          if (threeColumns) {
+                            return Row(
+                              children: [
+                                Expanded(child: appPortalPanel),
+                                const SizedBox(width: 12),
+                                Expanded(child: largePanel),
+                                const SizedBox(width: 12),
+                                Expanded(child: smallPanel),
+                              ],
+                            );
+                          }
+
+                          if (twoColumns) {
+                            return Column(
+                              children: [
+                                SizedBox(height: 340, child: appPortalPanel),
+                                const SizedBox(height: 12),
+                                Expanded(
+                                  child: Row(
+                                    children: [
+                                      Expanded(child: largePanel),
+                                      const SizedBox(width: 12),
+                                      Expanded(child: smallPanel),
+                                    ],
+                                  ),
+                                ),
+                              ],
+                            );
+                          }
+
+                          return ListView(
+                            children: [
+                              SizedBox(height: 380, child: appPortalPanel),
+                              const SizedBox(height: 12),
+                              SizedBox(height: 380, child: largePanel),
+                              const SizedBox(height: 12),
+                              SizedBox(height: 380, child: smallPanel),
+                            ],
                           );
                         },
                       ),
@@ -1275,6 +1943,355 @@ class _AdminDashboardState extends State<AdminDashboard> {
             ],
           ),
         ),
+      ),
+    );
+  }
+
+  Widget _adPlacementPanel({
+    required String title,
+    required String subtitle,
+    required List<AdminAd> ads,
+    required VoidCallback? onUpload,
+    required void Function(AdminAd ad) onDelete,
+    required String Function(AdminAd ad) imageForTile,
+  }) {
+    return Container(
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white12),
+      ),
+      child: Column(
+        children: [
+          ListTile(
+            title: Text(title),
+            subtitle: Text('$subtitle • ${ads.length} ad(s)'),
+            trailing: FilledButton.icon(
+              onPressed: onUpload,
+              icon: const Icon(Icons.upload),
+              label: const Text('Upload'),
+            ),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: ads.isEmpty
+                ? const Center(child: Text('No ads in this section.'))
+                : ListView.separated(
+                    itemCount: ads.length,
+                    separatorBuilder: (_, index) => const Divider(height: 1),
+                    itemBuilder: (_, i) {
+                      final ad = ads[i];
+                      final image = imageForTile(ad);
+                      return ListTile(
+                        leading: _thumb(image),
+                        title: Text(ad.title),
+                        subtitle: Text(
+                          '${ad.active ? 'ACTIVE' : 'INACTIVE'} • ${_fmtDate(ad.createdAt)}',
+                        ),
+                        trailing: IconButton(
+                          onPressed: _adsLoading ? null : () => onDelete(ad),
+                          icon: const Icon(
+                            Icons.delete,
+                            color: Colors.redAccent,
+                          ),
+                        ),
+                        onTap: image.isEmpty
+                            ? null
+                            : () => _openAdPreview(ad, image),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _statsTab() {
+    final traffic = _trafficStats;
+    final logs = _logSnapshot;
+    final keyword = _statsSearchCtrl.text.trim().toLowerCase();
+    final dateToken = _statsDateCtrl.text.trim().toLowerCase();
+
+    final filteredLogLines = (logs?.lines ?? const <String>[]).where((line) {
+      final value = line.toLowerCase();
+      if (keyword.isNotEmpty && !value.contains(keyword)) {
+        return false;
+      }
+      if (dateToken.isNotEmpty && !value.contains(dateToken)) {
+        return false;
+      }
+      if (!_logMatchesLevel(value, _statsLevelFilter)) {
+        return false;
+      }
+      return true;
+    }).toList();
+
+    final errorLines = filteredLogLines.where((line) {
+      final value = line.toLowerCase();
+      return value.contains('error') ||
+          value.contains('exception') ||
+          value.contains('fatal');
+    }).toList();
+
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Card(
+        child: Padding(
+          padding: const EdgeInsets.all(16),
+          child: Column(
+            children: [
+              Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      'Traffic Stats + Laravel Logs',
+                      style: Theme.of(context).textTheme.headlineSmall,
+                    ),
+                  ),
+                  DropdownButton<int>(
+                    value: _logLineLimit,
+                    items: const [
+                      DropdownMenuItem(value: 200, child: Text('200 lines')),
+                      DropdownMenuItem(value: 400, child: Text('400 lines')),
+                      DropdownMenuItem(value: 800, child: Text('800 lines')),
+                      DropdownMenuItem(value: 1200, child: Text('1200 lines')),
+                    ],
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setState(() => _logLineLimit = value);
+                      await _loadStats();
+                    },
+                  ),
+                  const SizedBox(width: 8),
+                  OutlinedButton.icon(
+                    onPressed: _statsLoading ? null : _loadStats,
+                    icon: const Icon(Icons.refresh),
+                    label: const Text('Refresh'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              if (_statsError != null && !_statsLoading)
+                Align(
+                  alignment: Alignment.centerLeft,
+                  child: Text(
+                    'Last refresh error: $_statsError',
+                    style: const TextStyle(color: Colors.redAccent),
+                  ),
+                ),
+              const SizedBox(height: 8),
+              Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  SizedBox(
+                    width: 300,
+                    child: TextField(
+                      controller: _statsSearchCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Search logs (keyword)',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 170,
+                    child: TextField(
+                      controller: _statsDateCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Date token',
+                        hintText: '2026-02-23',
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 160,
+                    child: DropdownButtonFormField<String>(
+                      value: _statsLevelFilter,
+                      decoration: const InputDecoration(
+                        labelText: 'Log level',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(value: 'all', child: Text('All')),
+                        DropdownMenuItem(value: 'error', child: Text('Error')),
+                        DropdownMenuItem(
+                          value: 'warning',
+                          child: Text('Warning'),
+                        ),
+                        DropdownMenuItem(value: 'info', child: Text('Info')),
+                        DropdownMenuItem(value: 'debug', child: Text('Debug')),
+                      ],
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setState(() => _statsLevelFilter = value);
+                      },
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      _statsSearchCtrl.clear();
+                      _statsDateCtrl.clear();
+                      setState(() => _statsLevelFilter = 'all');
+                    },
+                    icon: const Icon(Icons.clear_all),
+                    label: const Text('Clear'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Expanded(
+                child: _statsLoading && traffic == null && logs == null
+                    ? const Center(child: CircularProgressIndicator())
+                    : ListView(
+                        children: [
+                          Wrap(
+                            spacing: 10,
+                            runSpacing: 10,
+                            children: [
+                              _statMetricCard(
+                                title: 'Visitors / minute',
+                                value: '${traffic?.visitorsPerMinute ?? 0}',
+                              ),
+                              _statMetricCard(
+                                title: 'Visitors / hour',
+                                value: '${traffic?.visitorsPerHour ?? 0}',
+                              ),
+                              _statMetricCard(
+                                title: 'Visitors / 24h',
+                                value: '${traffic?.visitorsPer24Hours ?? 0}',
+                              ),
+                              _statMetricCard(
+                                title: 'Visitors / month',
+                                value: '${traffic?.visitorsPerMonth ?? 0}',
+                              ),
+                            ],
+                          ),
+                          const SizedBox(height: 12),
+                          Text(
+                            'Traffic snapshot: ${_fmtDate(traffic?.generatedAt)}',
+                          ),
+                          const SizedBox(height: 14),
+                          const Divider(),
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Laravel Log Stream'),
+                            subtitle: Text(
+                              'Files: ${(logs?.sourceFiles ?? const []).join(', ')}',
+                            ),
+                            trailing: Text(
+                              'Lines: ${filteredLogLines.length}'
+                              '${logs == null ? '' : ' / ${logs.lineCount}'}',
+                            ),
+                          ),
+                          Container(
+                            constraints: const BoxConstraints(minHeight: 240),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.white12),
+                              color: Colors.black26,
+                            ),
+                            child: filteredLogLines.isEmpty
+                                ? const Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(12),
+                                      child: Text(
+                                        'No log lines match current filters.',
+                                      ),
+                                    ),
+                                  )
+                                : ListView.builder(
+                                    shrinkWrap: true,
+                                    itemCount: filteredLogLines.length,
+                                    itemBuilder: (_, i) => Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 4,
+                                      ),
+                                      child: SelectableText(
+                                        filteredLogLines[i],
+                                        style: const TextStyle(fontSize: 12.5),
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                          const SizedBox(height: 14),
+                          const Divider(),
+                          ListTile(
+                            contentPadding: EdgeInsets.zero,
+                            title: const Text('Quick Error Watch'),
+                            subtitle: Text(
+                              '${errorLines.length} potential error line(s) detected.',
+                            ),
+                          ),
+                          Container(
+                            constraints: const BoxConstraints(minHeight: 120),
+                            decoration: BoxDecoration(
+                              borderRadius: BorderRadius.circular(8),
+                              border: Border.all(color: Colors.redAccent),
+                              color: Colors.black26,
+                            ),
+                            child: errorLines.isEmpty
+                                ? const Center(
+                                    child: Padding(
+                                      padding: EdgeInsets.all(12),
+                                      child: Text(
+                                        'No obvious error/exception lines in current snapshot.',
+                                      ),
+                                    ),
+                                  )
+                                : ListView.builder(
+                                    shrinkWrap: true,
+                                    itemCount: errorLines.length,
+                                    itemBuilder: (_, i) => Padding(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: 10,
+                                        vertical: 4,
+                                      ),
+                                      child: SelectableText(
+                                        errorLines[i],
+                                        style: const TextStyle(
+                                          fontSize: 12.5,
+                                          color: Colors.redAccent,
+                                        ),
+                                      ),
+                                    ),
+                                  ),
+                          ),
+                        ],
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _statMetricCard({required String title, required String value}) {
+    return Container(
+      width: 230,
+      padding: const EdgeInsets.all(12),
+      decoration: BoxDecoration(
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: Colors.white12),
+        color: Colors.black12,
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(title, style: const TextStyle(fontWeight: FontWeight.w600)),
+          const SizedBox(height: 6),
+          Text(
+            value,
+            style: const TextStyle(fontSize: 24, fontWeight: FontWeight.w700),
+          ),
+        ],
       ),
     );
   }
@@ -1349,6 +2366,28 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Widget _emailsTab() {
+    final inviteSearch = _inviteSearchCtrl.text.trim().toLowerCase();
+    final inviteDate = _inviteDateCtrl.text.trim().toLowerCase();
+
+    final visibleInvites = _invites.where((invite) {
+      final hay = [
+        invite.name,
+        invite.surname,
+        invite.email,
+        invite.whatsappPhone ?? '',
+        invite.status,
+      ].join(' ').toLowerCase();
+
+      if (inviteSearch.isNotEmpty && !hay.contains(inviteSearch)) {
+        return false;
+      }
+      if (inviteDate.isNotEmpty &&
+          !_dateMatches(invite.createdAt ?? invite.expiresAt, inviteDate)) {
+        return false;
+      }
+      return true;
+    }).toList();
+
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Column(
@@ -1439,6 +2478,51 @@ class _AdminDashboardState extends State<AdminDashboard> {
               ),
             ),
           ),
+          const SizedBox(height: 8),
+          Card(
+            child: Padding(
+              padding: const EdgeInsets.all(12),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                children: [
+                  SizedBox(
+                    width: 320,
+                    child: TextField(
+                      controller: _inviteSearchCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Search invite (name/email/phone/status)',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 180,
+                    child: TextField(
+                      controller: _inviteDateCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Date token',
+                        hintText: '2026-02-23',
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      _inviteSearchCtrl.clear();
+                      _inviteDateCtrl.clear();
+                      setState(() {});
+                    },
+                    icon: const Icon(Icons.clear_all),
+                    label: const Text('Clear'),
+                  ),
+                ],
+              ),
+            ),
+          ),
           const SizedBox(height: 12),
           Expanded(
             child: Card(
@@ -1446,7 +2530,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 children: [
                   ListTile(
                     title: const Text('Invite Email History'),
-                    subtitle: Text('${_invites.length} invite(s)'),
+                    subtitle: Text(
+                      '${visibleInvites.length} invite(s)'
+                      '${visibleInvites.length == _invites.length ? '' : ' / ${_invites.length} total'}',
+                    ),
                     trailing: Wrap(
                       spacing: 8,
                       children: [
@@ -1486,12 +2573,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         ? const Center(child: CircularProgressIndicator())
                         : _invitesError != null
                         ? Center(child: Text('Error: $_invitesError'))
-                        : _invites.isEmpty
+                        : visibleInvites.isEmpty
                         ? const Center(child: Text('No invites found.'))
                         : ListView.builder(
-                            itemCount: _invites.length,
+                            itemCount: visibleInvites.length,
                             itemBuilder: (_, i) {
-                              final invite = _invites[i];
+                              final invite = visibleInvites[i];
                               final inviteWhatsApp =
                                   (invite.whatsappPhone ?? '').trim();
 
@@ -1748,6 +2835,42 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Widget _invoicesTab() {
+    final invoiceSearch = _invoiceSearchCtrl.text.trim().toLowerCase();
+    final invoiceDate = _invoiceDateCtrl.text.trim().toLowerCase();
+
+    final visibleInvoices = _invoices.where((invoice) {
+      var method = (invoice.paymentMethod ?? invoice.providerKey ?? '')
+          .trim()
+          .toLowerCase();
+      if (method.isEmpty) method = 'unknown';
+      final hay = [
+        invoice.invoiceNumber,
+        invoice.username,
+        invoice.email,
+        invoice.accountNumber ?? '',
+        invoice.providerReference ?? '',
+        invoice.token,
+        method,
+        invoice.status,
+      ].join(' ').toLowerCase();
+
+      if (invoiceSearch.isNotEmpty && !hay.contains(invoiceSearch)) {
+        return false;
+      }
+      if (invoiceDate.isNotEmpty &&
+          !_dateMatches(
+            invoice.paidAt ?? invoice.completedAt ?? invoice.createdAt,
+            invoiceDate,
+          )) {
+        return false;
+      }
+      if (_invoiceMethodFilter != 'all' &&
+          method != _invoiceMethodFilter.trim().toLowerCase()) {
+        return false;
+      }
+      return true;
+    }).toList();
+
     return Padding(
       padding: const EdgeInsets.all(12),
       child: Card(
@@ -1755,7 +2878,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
           children: [
             ListTile(
               title: const Text('Invoices / Payments'),
-              subtitle: Text('${_invoices.length} row(s)'),
+              subtitle: Text(
+                '${visibleInvoices.length} row(s)'
+                '${visibleInvoices.length == _invoices.length ? '' : ' / ${_invoices.length} total'}',
+              ),
               trailing: Wrap(
                 spacing: 8,
                 crossAxisAlignment: WrapCrossAlignment.center,
@@ -1781,6 +2907,26 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       await _loadInvoices();
                     },
                   ),
+                  DropdownButton<String>(
+                    value: _invoiceMethodFilter,
+                    items: const [
+                      DropdownMenuItem(value: 'all', child: Text('All Method')),
+                      DropdownMenuItem(
+                        value: 'payfast',
+                        child: Text('PayFast'),
+                      ),
+                      DropdownMenuItem(value: 'ozow', child: Text('Ozow')),
+                      DropdownMenuItem(value: 'eft', child: Text('EFT')),
+                      DropdownMenuItem(
+                        value: 'unknown',
+                        child: Text('Unknown'),
+                      ),
+                    ],
+                    onChanged: (v) {
+                      if (v == null) return;
+                      setState(() => _invoiceMethodFilter = v);
+                    },
+                  ),
                   Row(
                     mainAxisSize: MainAxisSize.min,
                     children: [
@@ -1803,26 +2949,72 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 ],
               ),
             ),
+            Padding(
+              padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
+              child: Wrap(
+                spacing: 10,
+                runSpacing: 8,
+                children: [
+                  SizedBox(
+                    width: 340,
+                    child: TextField(
+                      controller: _invoiceSearchCtrl,
+                      decoration: const InputDecoration(
+                        labelText:
+                            'Search invoice/user/account/email/ref/method',
+                        border: OutlineInputBorder(),
+                        prefixIcon: Icon(Icons.search),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  SizedBox(
+                    width: 180,
+                    child: TextField(
+                      controller: _invoiceDateCtrl,
+                      decoration: const InputDecoration(
+                        labelText: 'Date token',
+                        hintText: '2026-02-23',
+                        border: OutlineInputBorder(),
+                      ),
+                      onChanged: (_) => setState(() {}),
+                    ),
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: () {
+                      _invoiceSearchCtrl.clear();
+                      _invoiceDateCtrl.clear();
+                      setState(() => _invoiceMethodFilter = 'all');
+                    },
+                    icon: const Icon(Icons.clear_all),
+                    label: const Text('Clear'),
+                  ),
+                ],
+              ),
+            ),
             const Divider(height: 1),
             Expanded(
               child: _invoicesLoading
                   ? const Center(child: CircularProgressIndicator())
                   : _invoicesError != null
                   ? Center(child: Text('Error: $_invoicesError'))
-                  : _invoices.isEmpty
+                  : visibleInvoices.isEmpty
                   ? const Center(child: Text('No invoices found.'))
                   : ListView.separated(
-                      itemCount: _invoices.length,
+                      itemCount: visibleInvoices.length,
                       separatorBuilder: (_, index) => const Divider(height: 1),
                       itemBuilder: (_, i) {
-                        final invoice = _invoices[i];
+                        final invoice = visibleInvoices[i];
                         return ListTile(
                           leading: const Icon(Icons.receipt_long),
                           title: Text(
                             '${invoice.invoiceNumber} • ${invoice.totalAmount.toStringAsFixed(2)} ${invoice.currency}',
                           ),
                           subtitle: Text(
-                            '${invoice.username} (${invoice.accountNumber ?? 'no account'})\nStatus: ${invoice.status} • Ref: ${invoice.providerReference ?? invoice.token}',
+                            '${invoice.username} (${invoice.accountNumber ?? 'no account'})\n'
+                            'Status: ${invoice.status} • Method: ${invoice.paymentMethod ?? invoice.providerKey ?? 'Unknown'}\n'
+                            'Ref: ${invoice.providerReference ?? invoice.token}'
+                            '${(invoice.billingCycle ?? '').trim().isEmpty ? '' : ' • Cycle: ${invoice.billingCycle}'}',
                           ),
                           isThreeLine: true,
                           trailing: Column(
