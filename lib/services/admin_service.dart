@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:http/http.dart' as http;
+import 'package:http_parser/http_parser.dart';
 
 import '../models/admin_models.dart';
 import '../platform/platform_features.dart';
@@ -419,7 +420,12 @@ class AdminService {
     }
 
     req.files.add(
-      http.MultipartFile.fromBytes('large', imageBytes, filename: imageName),
+      http.MultipartFile.fromBytes(
+        'large',
+        imageBytes,
+        filename: imageName,
+        contentType: _imageMediaTypeForFileName(imageName),
+      ),
     );
     if (smallBytes != null &&
         smallName != null &&
@@ -429,11 +435,17 @@ class AdminService {
           'small',
           smallBytes,
           filename: smallName.trim(),
+          contentType: _imageMediaTypeForFileName(smallName),
         ),
       );
     }
     req.files.add(
-      http.MultipartFile.fromBytes('thumb', thumbBytes, filename: thumbName),
+      http.MultipartFile.fromBytes(
+        'thumb',
+        thumbBytes,
+        filename: thumbName,
+        contentType: _imageMediaTypeForFileName(thumbName),
+      ),
     );
 
     final streamed = await req.send();
@@ -928,7 +940,12 @@ class AdminService {
     if (weight != null) req.fields['weight'] = '$weight';
 
     req.files.add(
-      http.MultipartFile.fromBytes(fileField, fileBytes, filename: fileName),
+      http.MultipartFile.fromBytes(
+        fileField,
+        fileBytes,
+        filename: fileName,
+        contentType: _imageMediaTypeForFileName(fileName),
+      ),
     );
 
     final streamed = await req.send();
@@ -961,6 +978,21 @@ class AdminService {
     throw Exception(
       _extractMessage(body) ?? 'Failed to delete ad (${res.statusCode}).',
     );
+  }
+
+  MediaType _imageMediaTypeForFileName(String fileName) {
+    final normalized = fileName.trim().toLowerCase();
+    if (normalized.endsWith('.jpg') || normalized.endsWith('.jpeg')) {
+      return MediaType('image', 'jpeg');
+    }
+    if (normalized.endsWith('.png')) {
+      return MediaType('image', 'png');
+    }
+    if (normalized.endsWith('.webp')) {
+      return MediaType('image', 'webp');
+    }
+
+    return MediaType('application', 'octet-stream');
   }
 
   dynamic _safeJson(String raw) {
