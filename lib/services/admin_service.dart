@@ -23,6 +23,20 @@ class AdminOtpChallenge {
   });
 }
 
+class AdminPaymentLinkResult {
+  final AdminInvoice invoice;
+  final String? message;
+  final String? mailWarning;
+
+  const AdminPaymentLinkResult({
+    required this.invoice,
+    this.message,
+    this.mailWarning,
+  });
+
+  bool get hasMailWarning => (mailWarning ?? '').trim().isNotEmpty;
+}
+
 class AdminService {
   static const String _baseUrl = String.fromEnvironment(
     'ADMIN_API_BASE_URL',
@@ -280,6 +294,60 @@ class AdminService {
 
     throw Exception(
       _extractMessage(body) ?? 'Failed to create user (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminPaymentLinkResult> createMemberPaymentLink({
+    required int userId,
+    List<String> licenseTypes = const [],
+    bool sendEmail = true,
+    String billingPreference = 'subscription',
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/payment-link');
+
+    final payload = <String, dynamic>{
+      'license_types': licenseTypes
+          .map((e) => e.trim())
+          .where((e) => e.isNotEmpty)
+          .toList(),
+      'send_email': sendEmail,
+      'billing_preference': billingPreference.trim().isEmpty
+          ? 'subscription'
+          : billingPreference.trim(),
+    };
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map) {
+        final invoiceRaw = body['invoice'];
+        if (invoiceRaw is Map) {
+          return AdminPaymentLinkResult(
+            invoice: AdminInvoice.fromJson(invoiceRaw.cast<String, dynamic>()),
+            message: (body['message'] ?? '').toString().trim().isEmpty
+                ? null
+                : (body['message'] ?? '').toString().trim(),
+            mailWarning:
+                (body['mail_warning'] ?? body['mailWarning'] ?? '')
+                    .toString()
+                    .trim()
+                    .isEmpty
+                ? null
+                : (body['mail_warning'] ?? body['mailWarning'] ?? '')
+                      .toString()
+                      .trim(),
+          );
+        }
+      }
+      throw Exception('Payment link created but invoice payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to create payment link (${res.statusCode}).',
     );
   }
 
