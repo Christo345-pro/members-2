@@ -37,6 +37,22 @@ class AdminPaymentLinkResult {
   bool get hasMailWarning => (mailWarning ?? '').trim().isNotEmpty;
 }
 
+class AdminCreateMemberResult {
+  final AdminUser user;
+  final String? tempPassword;
+  final bool passwordIsTemporary;
+  final String? portalProfileSetupUrl;
+  final String? portalLoginUrl;
+
+  const AdminCreateMemberResult({
+    required this.user,
+    this.tempPassword,
+    this.passwordIsTemporary = false,
+    this.portalProfileSetupUrl,
+    this.portalLoginUrl,
+  });
+}
+
 class AdminService {
   static const String _baseUrl = String.fromEnvironment(
     'ADMIN_API_BASE_URL',
@@ -246,15 +262,15 @@ class AdminService {
     );
   }
 
-  Future<AdminUser> createMemberUser({
+  Future<AdminCreateMemberResult> createMemberUser({
     required String username,
     required String email,
     required String name,
     String? surname,
     String? phone,
     String? whatsapp,
-    required String password,
     String? plan,
+    String? appType,
     bool appAndroid = false,
     bool appWindows = false,
     bool appWeb = false,
@@ -265,7 +281,6 @@ class AdminService {
       'username': username.trim(),
       'email': email.trim().toLowerCase(),
       'name': name.trim(),
-      'password': password,
       'app_android': appAndroid,
       'app_windows': appWindows,
       'app_web': appWeb,
@@ -274,6 +289,7 @@ class AdminService {
       if ((phone ?? '').trim().isNotEmpty) 'phone': phone!.trim(),
       if ((whatsapp ?? '').trim().isNotEmpty) 'whatsapp': whatsapp!.trim(),
       if ((plan ?? '').trim().isNotEmpty) 'plan': plan!.trim(),
+      if ((appType ?? '').trim().isNotEmpty) 'app_type': appType!.trim(),
     };
 
     final res = await http
@@ -282,12 +298,45 @@ class AdminService {
     final body = _safeJson(res.body);
 
     if (res.statusCode >= 200 && res.statusCode < 300) {
-      final userRaw = body is Map ? body['user'] : null;
+      final map = body is Map ? body : <dynamic, dynamic>{};
+      final userRaw = map['user'];
       if (userRaw is Map) {
-        return AdminUser.fromJson(userRaw.cast<String, dynamic>());
+        return AdminCreateMemberResult(
+          user: AdminUser.fromJson(userRaw.cast<String, dynamic>()),
+          tempPassword: (map['temp_password'] ?? '').toString().trim().isEmpty
+              ? null
+              : (map['temp_password'] ?? '').toString().trim(),
+          passwordIsTemporary: _parseBoolLoose(
+            map['password_is_temporary'] ?? map['passwordIsTemporary'],
+          ),
+          portalProfileSetupUrl:
+              (map['portal_profile_setup_url'] ??
+                      map['portalProfileSetupUrl'] ??
+                      '')
+                  .toString()
+                  .trim()
+                  .isEmpty
+              ? null
+              : (map['portal_profile_setup_url'] ??
+                        map['portalProfileSetupUrl'] ??
+                        '')
+                    .toString()
+                    .trim(),
+          portalLoginUrl:
+              (map['portal_login_url'] ?? map['portalLoginUrl'] ?? '')
+                  .toString()
+                  .trim()
+                  .isEmpty
+              ? null
+              : (map['portal_login_url'] ?? map['portalLoginUrl'] ?? '')
+                    .toString()
+                    .trim(),
+        );
       }
       if (body is Map && body.containsKey('id')) {
-        return AdminUser.fromJson(body.cast<String, dynamic>());
+        return AdminCreateMemberResult(
+          user: AdminUser.fromJson(body.cast<String, dynamic>()),
+        );
       }
       throw Exception('User created, but response payload missing user.');
     }

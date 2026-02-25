@@ -75,12 +75,15 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _toolCreatePhoneCtrl = TextEditingController();
   final _toolCreateWhatsAppCtrl = TextEditingController();
   final _toolCreatePlanCtrl = TextEditingController(text: 'free');
-  final _toolCreatePasswordCtrl = TextEditingController();
   bool _toolCreateAndroid = false;
   bool _toolCreateWindows = false;
   bool _toolCreateWeb = false;
+  bool _toolCreateBlocked = false;
   bool _toolCreateSendPaymentLink = true;
+  bool _toolCreateCheckoutAndroid = true;
+  bool _toolCreateCheckoutWeb = false;
   String _toolCreateCheckoutPack = 'base';
+  String _toolCreateBillingPreference = 'subscription';
   final _toolPasswordCtrl = TextEditingController();
   final _toolPasswordConfirmCtrl = TextEditingController();
 
@@ -169,7 +172,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _toolCreatePhoneCtrl.dispose();
     _toolCreateWhatsAppCtrl.dispose();
     _toolCreatePlanCtrl.dispose();
-    _toolCreatePasswordCtrl.dispose();
     _toolPasswordCtrl.dispose();
     _toolPasswordConfirmCtrl.dispose();
     _pushMessageCtrl.dispose();
@@ -453,6 +455,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  Future<void> _openWhatsAppInboxTab() async {
+    if (!mounted) return;
+    setState(() => _tab = 7);
+    await _waInboxKey.currentState?.refreshAll();
+  }
+
   Future<void> _loadMembers() async {
     if (_membersLoading) return;
 
@@ -595,21 +603,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _toolCreatePhoneCtrl.clear();
     _toolCreateWhatsAppCtrl.clear();
     _toolCreatePlanCtrl.text = 'free';
-    _toolCreatePasswordCtrl.clear();
     _toolCreateAndroid = false;
     _toolCreateWindows = false;
     _toolCreateWeb = false;
+    _toolCreateBlocked = false;
     _toolCreateSendPaymentLink = true;
+    _toolCreateCheckoutAndroid = true;
+    _toolCreateCheckoutWeb = false;
     _toolCreateCheckoutPack = 'base';
+    _toolCreateBillingPreference = 'subscription';
   }
 
   List<String> _paymentLinkLicenseTypesForCreateUser() {
     final types = <String>[];
 
-    if (_toolCreateAndroid) {
+    if (_toolCreateCheckoutAndroid) {
       types.add('home_hooligan_android');
     }
-    if (_toolCreateWeb) {
+    if (_toolCreateCheckoutWeb) {
       types.add('home_hooligan_web');
     }
     if (types.isEmpty) {
@@ -728,7 +739,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                     ),
                     const SizedBox(height: 4),
                     const Text(
-                      'The system will create checkout + send the payment link via WhatsApp webhook.',
+                      'The system will create checkout + send via WhatsApp webhook template (whatsapp_general).',
                       style: TextStyle(fontSize: 12),
                     ),
                   ],
@@ -798,7 +809,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
       );
 
       await _loadInvoices();
-      await _waInboxKey.currentState?.refreshAll();
+      await _openWhatsAppInboxTab();
 
       final detail = await _service.fetchMemberDetail(user.id);
       if (!mounted) return;
@@ -826,18 +837,25 @@ class _AdminDashboardState extends State<AdminDashboard> {
         final username = _toolCreateUsernameCtrl.text.trim();
         final email = _toolCreateEmailCtrl.text.trim().toLowerCase();
         final name = _toolCreateNameCtrl.text.trim();
-        final password = _toolCreatePasswordCtrl.text;
 
         if (username.isEmpty || email.isEmpty || name.isEmpty) {
           _toast('Username, email and name are required.');
           return;
         }
-        if (password.trim().length < 8) {
-          _toast('Password must be at least 8 characters.');
+        if (_toolCreateSendPaymentLink && _toolCreateBlocked) {
+          _toast(
+            'Cannot send payment link while "Create as blocked" is enabled.',
+          );
+          return;
+        }
+        if (_toolCreateSendPaymentLink &&
+            !_toolCreateCheckoutAndroid &&
+            !_toolCreateCheckoutWeb) {
+          _toast('Select Android and/or Web base for payment link.');
           return;
         }
 
-        final created = await _service.createMemberUser(
+        final createResult = await _service.createMemberUser(
           username: username,
           email: email,
           name: name,
@@ -850,14 +868,15 @@ class _AdminDashboardState extends State<AdminDashboard> {
           whatsapp: _toolCreateWhatsAppCtrl.text.trim().isEmpty
               ? null
               : _toolCreateWhatsAppCtrl.text.trim(),
-          password: password,
           plan: _toolCreatePlanCtrl.text.trim().isEmpty
               ? null
               : _toolCreatePlanCtrl.text.trim(),
           appAndroid: _toolCreateAndroid,
           appWindows: _toolCreateWindows,
           appWeb: _toolCreateWeb,
+          isBlocked: _toolCreateBlocked,
         );
+        final created = createResult.user;
 
         AdminPaymentLinkResult? paymentLinkResult;
         String? paymentLinkError;
@@ -872,12 +891,18 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 userId: created.id,
                 licenseTypes: _paymentLinkLicenseTypesForCreateUser(),
                 sendEmail: false,
+                billingPreference: _toolCreateBillingPreference,
               );
               await _service.sendWaMessage(
                 waUser: waDigits,
                 body: _paymentLinkWhatsAppMessage(
                   user: created,
                   invoice: paymentLinkResult.invoice,
+                  tempPassword: createResult.passwordIsTemporary
+                      ? createResult.tempPassword
+                      : null,
+                  passwordSetupUrl: createResult.portalProfileSetupUrl,
+                  loginUrl: createResult.portalLoginUrl,
                 ),
               );
             } catch (e) {
@@ -907,7 +932,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         await _loadMembers();
         if (paymentLinkResult != null) {
           await _loadInvoices();
-          await _waInboxKey.currentState?.refreshAll();
+          await _openWhatsAppInboxTab();
         }
         if (!mounted) return;
         setState(() {
@@ -1948,6 +1973,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
   String _paymentLinkWhatsAppMessage({
     required AdminUser user,
     required AdminInvoice invoice,
+    String? tempPassword,
+    String? passwordSetupUrl,
+    String? loginUrl,
   }) {
     final displayName = '${user.name ?? ''} ${user.surname ?? ''}'.trim();
     final firstName = displayName.isEmpty
@@ -1964,6 +1992,19 @@ class _AdminDashboardState extends State<AdminDashboard> {
     ];
     if (paymentUrl.isNotEmpty) {
       lines.add('Pay here: $paymentUrl');
+    }
+    final cleanTempPassword = (tempPassword ?? '').trim();
+    if (cleanTempPassword.isNotEmpty) {
+      lines.add('Temp password: $cleanTempPassword');
+    }
+    final cleanPasswordSetupUrl = (passwordSetupUrl ?? '').trim();
+    if (cleanPasswordSetupUrl.isNotEmpty) {
+      lines.add('Change your password online: $cleanPasswordSetupUrl');
+    } else {
+      final cleanLoginUrl = (loginUrl ?? '').trim();
+      if (cleanLoginUrl.isNotEmpty) {
+        lines.add('Login online: $cleanLoginUrl');
+      }
     }
     lines.add('Reply here if you need help.');
 
@@ -2787,12 +2828,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       width: 220,
                     ),
                     _toolsField(_toolCreatePlanCtrl, 'Plan', width: 160),
-                    _toolsField(
-                      _toolCreatePasswordCtrl,
-                      'Password',
-                      width: 260,
-                      obscure: true,
-                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -2833,6 +2868,17 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         title: const Text('Allow Web'),
                       ),
                     ),
+                    SizedBox(
+                      width: 220,
+                      child: CheckboxListTile(
+                        value: _toolCreateBlocked,
+                        onChanged: (value) {
+                          setState(() => _toolCreateBlocked = value == true);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Create as blocked'),
+                      ),
+                    ),
                   ],
                 ),
                 const SizedBox(height: 8),
@@ -2868,6 +2914,65 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       ),
                     ),
                     SizedBox(
+                      width: 220,
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _toolCreateBillingPreference,
+                        decoration: const InputDecoration(
+                          labelText: 'Billing preference',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'subscription',
+                            child: Text('Subscription'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'invoice_monthly',
+                            child: Text('Invoice Monthly'),
+                          ),
+                        ],
+                        onChanged: _toolCreateSendPaymentLink
+                            ? (value) {
+                                if (value == null) return;
+                                setState(
+                                  () => _toolCreateBillingPreference = value,
+                                );
+                              }
+                            : null,
+                      ),
+                    ),
+                    SizedBox(
+                      width: 220,
+                      child: CheckboxListTile(
+                        value: _toolCreateCheckoutAndroid,
+                        onChanged: _toolCreateSendPaymentLink
+                            ? (value) {
+                                setState(
+                                  () => _toolCreateCheckoutAndroid =
+                                      value == true,
+                                );
+                              }
+                            : null,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Charge Android base'),
+                      ),
+                    ),
+                    SizedBox(
+                      width: 220,
+                      child: CheckboxListTile(
+                        value: _toolCreateCheckoutWeb,
+                        onChanged: _toolCreateSendPaymentLink
+                            ? (value) {
+                                setState(
+                                  () => _toolCreateCheckoutWeb = value == true,
+                                );
+                              }
+                            : null,
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Charge Web base'),
+                      ),
+                    ),
+                    SizedBox(
                       width: 300,
                       child: CheckboxListTile(
                         value: _toolCreateSendPaymentLink,
@@ -2879,7 +2984,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Send payment link after create'),
                         subtitle: const Text(
-                          'Creates checkout and sends link via WhatsApp webhook.',
+                          'Creates checkout and sends payment link + temp password + online password-change link via whatsapp_general.',
                         ),
                       ),
                     ),
