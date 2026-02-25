@@ -349,6 +349,7 @@ class AdminService {
   Future<AdminPaymentLinkResult> createMemberPaymentLink({
     required int userId,
     List<String> licenseTypes = const [],
+    Map<String, String> addonPlatforms = const {},
     bool sendEmail = true,
     String billingPreference = 'subscription',
   }) async {
@@ -359,6 +360,9 @@ class AdminService {
           .map((e) => e.trim())
           .where((e) => e.isNotEmpty)
           .toList(),
+      'addon_platforms': addonPlatforms.map((key, value) {
+        return MapEntry(key.trim(), value.trim().toLowerCase());
+      }),
       'send_email': sendEmail,
       'billing_preference': billingPreference.trim().isEmpty
           ? 'subscription'

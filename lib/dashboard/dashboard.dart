@@ -49,6 +49,27 @@ class _AdminDashboardState extends State<AdminDashboard> {
     'MEMBERS_WHATSAPP_WEB_BASE',
     defaultValue: 'https://wa.me',
   );
+  static const Map<String, String> _checkoutAddonLabels = {
+    'daily_temperature_forecast': 'Daily Temperature Forecast',
+    'daily_rain_forecast': 'Daily Rain Forecast',
+    'ten_day_forecast': '10 Day Forecast',
+    'swell_forecast': 'Swell Forecast',
+    'live_weather_alerts': 'Live Weather Alerts',
+    'compass': 'Compass',
+    'radar': 'Radar',
+    'stormpath_whatsapp_notifications': 'Stormpath WhatsApp Notifications',
+    'general_weather_whatsapp_notifications':
+        'General Weather WhatsApp Notifications',
+    'daily_location_whatsapp_weather':
+        'Daily Weather For Your Location (WhatsApp)',
+  };
+  static const Set<String> _platformSelectableAddons = {
+    'daily_temperature_forecast',
+    'daily_rain_forecast',
+    'ten_day_forecast',
+    'swell_forecast',
+    'radar',
+  };
 
   int _tab = 0;
 
@@ -82,7 +103,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
   bool _toolCreateSendPaymentLink = true;
   bool _toolCreateCheckoutAndroid = true;
   bool _toolCreateCheckoutWeb = false;
-  String _toolCreateCheckoutPack = 'base';
+  final Set<String> _toolCreateCheckoutAddons = <String>{};
+  final Map<String, String> _toolCreateCheckoutAddonPlatforms =
+      <String, String>{};
   String _toolCreateBillingPreference = 'subscription';
   final _toolPasswordCtrl = TextEditingController();
   final _toolPasswordConfirmCtrl = TextEditingController();
@@ -610,36 +633,19 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _toolCreateSendPaymentLink = true;
     _toolCreateCheckoutAndroid = true;
     _toolCreateCheckoutWeb = false;
-    _toolCreateCheckoutPack = 'base';
+    _toolCreateCheckoutAddons.clear();
+    _toolCreateCheckoutAddonPlatforms.clear();
     _toolCreateBillingPreference = 'subscription';
   }
 
-  List<String> _paymentLinkLicenseTypesForCreateUser() {
-    final types = <String>[];
-
-    if (_toolCreateCheckoutAndroid) {
-      types.add('home_hooligan_android');
-    }
-    if (_toolCreateCheckoutWeb) {
-      types.add('home_hooligan_web');
-    }
-    if (types.isEmpty) {
-      // Default to Android base package when no device checkboxes were selected.
-      types.add('home_hooligan_android');
-    }
-
-    if (_toolCreateCheckoutPack == 'travel') {
-      types.add('ten_day_forecast');
-      types.add('swell_forecast');
-    }
-
-    return types;
+  bool _isPlatformSelectableAddon(String addonType) {
+    return _platformSelectableAddons.contains(addonType.trim().toLowerCase());
   }
 
-  List<String> _paymentLinkLicenseTypes({
+  List<String> _composePaymentLinkLicenseTypes({
     required bool includeAndroid,
     required bool includeWeb,
-    required String checkoutPack,
+    required Iterable<String> selectedAddons,
   }) {
     final types = <String>[];
 
@@ -649,16 +655,66 @@ class _AdminDashboardState extends State<AdminDashboard> {
     if (includeWeb) {
       types.add('home_hooligan_web');
     }
-    if (types.isEmpty) {
-      types.add('home_hooligan_android');
-    }
-
-    if (checkoutPack == 'travel') {
-      types.add('ten_day_forecast');
-      types.add('swell_forecast');
+    for (final addon in selectedAddons) {
+      final key = addon.trim().toLowerCase();
+      if (_checkoutAddonLabels.containsKey(key)) {
+        types.add(key);
+      }
     }
 
     return types;
+  }
+
+  List<String> _paymentLinkLicenseTypesForCreateUser() {
+    return _composePaymentLinkLicenseTypes(
+      includeAndroid: _toolCreateCheckoutAndroid,
+      includeWeb: _toolCreateCheckoutWeb,
+      selectedAddons: _toolCreateCheckoutAddons,
+    );
+  }
+
+  Map<String, String> _selectedAddonPlatforms({
+    required bool includeAndroid,
+    required bool includeWeb,
+    required Iterable<String> selectedAddons,
+    required Map<String, String> rawChoices,
+  }) {
+    final hasBothBase = includeAndroid && includeWeb;
+    if (!hasBothBase) {
+      return <String, String>{};
+    }
+
+    final out = <String, String>{};
+    for (final addon in selectedAddons) {
+      final key = addon.trim().toLowerCase();
+      if (!_isPlatformSelectableAddon(key)) {
+        continue;
+      }
+      final choice = (rawChoices[key] ?? 'both').trim().toLowerCase();
+      if (choice == 'android' || choice == 'web' || choice == 'both') {
+        out[key] = choice;
+      } else {
+        out[key] = 'both';
+      }
+    }
+    return out;
+  }
+
+  Set<String> _defaultCheckoutAddonsForUser(AdminUser user) {
+    final out = <String>{};
+    for (final license in user.licenses) {
+      final key = license.licenseType.trim().toLowerCase();
+      if (_checkoutAddonLabels.containsKey(key)) {
+        out.add(key);
+      }
+    }
+
+    if (out.isEmpty && (user.plan ?? '').trim().toLowerCase() == 'travel') {
+      out.add('ten_day_forecast');
+      out.add('swell_forecast');
+    }
+
+    return out;
   }
 
   Future<void> _sendMemberPaymentLink(AdminUser user) async {
@@ -674,75 +730,152 @@ class _AdminDashboardState extends State<AdminDashboard> {
       return;
     }
 
-    final defaultPack = (user.plan ?? '').trim().toLowerCase() == 'travel'
-        ? 'travel'
-        : 'base';
     final defaultWeb = user.appWeb == true;
     final defaultAndroid = user.appAndroid == true || !defaultWeb;
+    final defaultAddons = _defaultCheckoutAddonsForUser(user);
 
     final options = await showDialog<Map<String, dynamic>>(
       context: context,
       builder: (dialogContext) {
-        var checkoutPack = defaultPack;
         var includeAndroid = defaultAndroid;
         var includeWeb = defaultWeb;
+        var billingPreference = 'subscription';
+        final selectedAddons = <String>{...defaultAddons};
+        final addonPlatforms = <String, String>{};
+        for (final addon in selectedAddons) {
+          if (_isPlatformSelectableAddon(addon)) {
+            addonPlatforms[addon] = 'both';
+          }
+        }
 
         return StatefulBuilder(
           builder: (context, setDialogState) {
             return AlertDialog(
               title: const Text('Send Payment Link'),
               content: SizedBox(
-                width: 420,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text('Member: ${user.username}'),
-                    const SizedBox(height: 10),
-                    DropdownButtonFormField<String>(
-                      initialValue: checkoutPack,
-                      decoration: const InputDecoration(
-                        labelText: 'Payment package',
-                        border: OutlineInputBorder(),
+                width: 560,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Member: ${user.username}'),
+                      const SizedBox(height: 10),
+                      CheckboxListTile(
+                        value: includeAndroid,
+                        onChanged: (value) {
+                          setDialogState(() => includeAndroid = value == true);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Android base'),
                       ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'base',
-                          child: Text('Base Package'),
+                      CheckboxListTile(
+                        value: includeWeb,
+                        onChanged: (value) {
+                          setDialogState(() => includeWeb = value == true);
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Web base'),
+                      ),
+                      const SizedBox(height: 8),
+                      DropdownButtonFormField<String>(
+                        initialValue: billingPreference,
+                        decoration: const InputDecoration(
+                          labelText: 'Billing preference',
+                          border: OutlineInputBorder(),
                         ),
-                        DropdownMenuItem(
-                          value: 'travel',
-                          child: Text('Travel Pack (Base + Add-ons)'),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'subscription',
+                            child: Text('Subscription'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'invoice_monthly',
+                            child: Text('Invoice Monthly'),
+                          ),
+                        ],
+                        onChanged: (value) {
+                          if (value == null) return;
+                          setDialogState(() => billingPreference = value);
+                        },
+                      ),
+                      const SizedBox(height: 12),
+                      const Text(
+                        'Add-on options',
+                        style: TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 6),
+                      for (final entry in _checkoutAddonLabels.entries) ...[
+                        CheckboxListTile(
+                          value: selectedAddons.contains(entry.key),
+                          onChanged: (value) {
+                            setDialogState(() {
+                              if (value == true) {
+                                selectedAddons.add(entry.key);
+                                if (_isPlatformSelectableAddon(entry.key)) {
+                                  addonPlatforms[entry.key] =
+                                      addonPlatforms[entry.key] ?? 'both';
+                                }
+                              } else {
+                                selectedAddons.remove(entry.key);
+                                addonPlatforms.remove(entry.key);
+                              }
+                            });
+                          },
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(entry.value),
                         ),
+                        if (selectedAddons.contains(entry.key) &&
+                            includeAndroid &&
+                            includeWeb &&
+                            _isPlatformSelectableAddon(entry.key))
+                          Padding(
+                            padding: const EdgeInsets.only(
+                              left: 14,
+                              right: 10,
+                              bottom: 8,
+                            ),
+                            child: SizedBox(
+                              width: 260,
+                              child: DropdownButtonFormField<String>(
+                                initialValue:
+                                    addonPlatforms[entry.key] ?? 'both',
+                                decoration: const InputDecoration(
+                                  labelText: 'Addon platform',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                                items: const [
+                                  DropdownMenuItem(
+                                    value: 'android',
+                                    child: Text('Android'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'web',
+                                    child: Text('Web'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'both',
+                                    child: Text('Both'),
+                                  ),
+                                ],
+                                onChanged: (value) {
+                                  if (value == null) return;
+                                  setDialogState(
+                                    () => addonPlatforms[entry.key] = value,
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
                       ],
-                      onChanged: (value) {
-                        if (value == null) return;
-                        setDialogState(() => checkoutPack = value);
-                      },
-                    ),
-                    const SizedBox(height: 10),
-                    CheckboxListTile(
-                      value: includeAndroid,
-                      onChanged: (value) {
-                        setDialogState(() => includeAndroid = value == true);
-                      },
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('Android base'),
-                    ),
-                    CheckboxListTile(
-                      value: includeWeb,
-                      onChanged: (value) {
-                        setDialogState(() => includeWeb = value == true);
-                      },
-                      contentPadding: EdgeInsets.zero,
-                      title: const Text('Web base'),
-                    ),
-                    const SizedBox(height: 4),
-                    const Text(
-                      'The system will create checkout + send via WhatsApp webhook template (whatsapp_general).',
-                      style: TextStyle(fontSize: 12),
-                    ),
-                  ],
+                      const SizedBox(height: 4),
+                      const Text(
+                        'Creates checkout + sends via WhatsApp webhook template (whatsapp_general).',
+                        style: TextStyle(fontSize: 12),
+                      ),
+                    ],
+                  ),
                 ),
               ),
               actions: [
@@ -763,9 +896,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       return;
                     }
                     Navigator.pop(dialogContext, {
-                      'checkout_pack': checkoutPack,
                       'include_android': includeAndroid,
                       'include_web': includeWeb,
+                      'billing_preference': billingPreference,
+                      'addons': selectedAddons.toList(),
+                      'addon_platforms': addonPlatforms,
                     });
                   },
                   child: const Text('Send Link'),
@@ -779,16 +914,36 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
     if (options == null) return;
 
-    final checkoutPack = (options['checkout_pack'] ?? 'base')
+    final includeAndroid = options['include_android'] == true;
+    final includeWeb = options['include_web'] == true;
+    final billingPreference = (options['billing_preference'] ?? 'subscription')
         .toString()
         .trim()
         .toLowerCase();
-    final includeAndroid = options['include_android'] == true;
-    final includeWeb = options['include_web'] == true;
-    final licenseTypes = _paymentLinkLicenseTypes(
+    final selectedAddons = ((options['addons'] as List?) ?? const [])
+        .map((value) => value.toString().trim().toLowerCase())
+        .where((value) => _checkoutAddonLabels.containsKey(value))
+        .toSet();
+    final rawAddonPlatforms = <String, String>{};
+    final addonPlatformsRaw = options['addon_platforms'];
+    if (addonPlatformsRaw is Map) {
+      for (final entry in addonPlatformsRaw.entries) {
+        final key = entry.key.toString().trim().toLowerCase();
+        final value = entry.value.toString().trim().toLowerCase();
+        if (key.isEmpty || value.isEmpty) continue;
+        rawAddonPlatforms[key] = value;
+      }
+    }
+    final licenseTypes = _composePaymentLinkLicenseTypes(
       includeAndroid: includeAndroid,
       includeWeb: includeWeb,
-      checkoutPack: checkoutPack == 'travel' ? 'travel' : 'base',
+      selectedAddons: selectedAddons,
+    );
+    final addonPlatforms = _selectedAddonPlatforms(
+      includeAndroid: includeAndroid,
+      includeWeb: includeWeb,
+      selectedAddons: selectedAddons,
+      rawChoices: rawAddonPlatforms,
     );
 
     setState(() => _sendingMemberPaymentLinkUserId = user.id);
@@ -796,7 +951,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
       final result = await _service.createMemberPaymentLink(
         userId: user.id,
         licenseTypes: licenseTypes,
+        addonPlatforms: addonPlatforms,
         sendEmail: false,
+        billingPreference: billingPreference == 'invoice_monthly'
+            ? 'invoice_monthly'
+            : 'subscription',
       );
 
       await _service.sendWaMessage(
@@ -890,6 +1049,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
               paymentLinkResult = await _service.createMemberPaymentLink(
                 userId: created.id,
                 licenseTypes: _paymentLinkLicenseTypesForCreateUser(),
+                addonPlatforms: _selectedAddonPlatforms(
+                  includeAndroid: _toolCreateCheckoutAndroid,
+                  includeWeb: _toolCreateCheckoutWeb,
+                  selectedAddons: _toolCreateCheckoutAddons,
+                  rawChoices: _toolCreateCheckoutAddonPlatforms,
+                ),
                 sendEmail: false,
                 billingPreference: _toolCreateBillingPreference,
               );
@@ -2888,32 +3053,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   crossAxisAlignment: WrapCrossAlignment.center,
                   children: [
                     SizedBox(
-                      width: 260,
-                      child: DropdownButtonFormField<String>(
-                        initialValue: _toolCreateCheckoutPack,
-                        decoration: const InputDecoration(
-                          labelText: 'Payment package',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: const [
-                          DropdownMenuItem(
-                            value: 'base',
-                            child: Text('Base Package'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'travel',
-                            child: Text('Travel Pack (Base + Add-ons)'),
-                          ),
-                        ],
-                        onChanged: _toolCreateSendPaymentLink
-                            ? (value) {
-                                if (value == null) return;
-                                setState(() => _toolCreateCheckoutPack = value);
-                              }
-                            : null,
-                      ),
-                    ),
-                    SizedBox(
                       width: 220,
                       child: DropdownButtonFormField<String>(
                         initialValue: _toolCreateBillingPreference,
@@ -2973,6 +3112,106 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       ),
                     ),
                     SizedBox(
+                      width: 380,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        decoration: BoxDecoration(
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white24),
+                        ),
+                        child: const Text(
+                          'Add-on options',
+                          style: TextStyle(fontWeight: FontWeight.w700),
+                        ),
+                      ),
+                    ),
+                    for (final entry in _checkoutAddonLabels.entries) ...[
+                      SizedBox(
+                        width: 380,
+                        child: CheckboxListTile(
+                          value: _toolCreateCheckoutAddons.contains(entry.key),
+                          onChanged: _toolCreateSendPaymentLink
+                              ? (value) {
+                                  setState(() {
+                                    if (value == true) {
+                                      _toolCreateCheckoutAddons.add(entry.key);
+                                      if (_isPlatformSelectableAddon(
+                                        entry.key,
+                                      )) {
+                                        _toolCreateCheckoutAddonPlatforms[entry
+                                                .key] =
+                                            _toolCreateCheckoutAddonPlatforms[entry
+                                                .key] ??
+                                            'both';
+                                      }
+                                    } else {
+                                      _toolCreateCheckoutAddons.remove(
+                                        entry.key,
+                                      );
+                                      _toolCreateCheckoutAddonPlatforms.remove(
+                                        entry.key,
+                                      );
+                                    }
+                                  });
+                                }
+                              : null,
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(entry.value),
+                        ),
+                      ),
+                      if (_toolCreateSendPaymentLink &&
+                          _toolCreateCheckoutAddons.contains(entry.key) &&
+                          _toolCreateCheckoutAndroid &&
+                          _toolCreateCheckoutWeb &&
+                          _isPlatformSelectableAddon(entry.key))
+                        SizedBox(
+                          width: 520,
+                          child: Padding(
+                            padding: const EdgeInsets.only(left: 10),
+                            child: SizedBox(
+                              width: 260,
+                              child: DropdownButtonFormField<String>(
+                                initialValue:
+                                    _toolCreateCheckoutAddonPlatforms[entry
+                                        .key] ??
+                                    'both',
+                                decoration: const InputDecoration(
+                                  labelText: 'Addon platform',
+                                  border: OutlineInputBorder(),
+                                  isDense: true,
+                                ),
+                                items: const [
+                                  DropdownMenuItem(
+                                    value: 'android',
+                                    child: Text('Android'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'web',
+                                    child: Text('Web'),
+                                  ),
+                                  DropdownMenuItem(
+                                    value: 'both',
+                                    child: Text('Both'),
+                                  ),
+                                ],
+                                onChanged: (value) {
+                                  if (value == null) return;
+                                  setState(
+                                    () =>
+                                        _toolCreateCheckoutAddonPlatforms[entry
+                                                .key] =
+                                            value,
+                                  );
+                                },
+                              ),
+                            ),
+                          ),
+                        ),
+                    ],
+                    SizedBox(
                       width: 300,
                       child: CheckboxListTile(
                         value: _toolCreateSendPaymentLink,
@@ -2984,7 +3223,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Send payment link after create'),
                         subtitle: const Text(
-                          'Creates checkout and sends payment link + temp password + online password-change link via whatsapp_general.',
+                          'Creates checkout with selected ticks and sends payment link + temp password + online password-change link via whatsapp_general.',
                         ),
                       ),
                     ),
