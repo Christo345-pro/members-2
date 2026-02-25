@@ -391,7 +391,7 @@ class _AdsScreenState extends State<AdsScreen> {
         child: Image.network(
           url,
           fit: BoxFit.cover,
-          errorBuilder: (_, __, ___) =>
+          errorBuilder: (_, _, _) =>
               const Center(child: Icon(Icons.broken_image)),
           loadingBuilder: (ctx, child, prog) {
             if (prog == null) return child;
@@ -424,7 +424,7 @@ class _AdsScreenState extends State<AdsScreen> {
                   child: Image.network(
                     img,
                     fit: BoxFit.cover,
-                    errorBuilder: (_, __, ___) =>
+                    errorBuilder: (_, _, _) =>
                         const Center(child: Icon(Icons.broken_image)),
                   ),
                 ),
@@ -508,7 +508,7 @@ class _AdsScreenState extends State<AdsScreen> {
                 : ListView.separated(
                     padding: const EdgeInsets.all(12),
                     itemCount: _ads.length,
-                    separatorBuilder: (_, __) => const Divider(height: 1),
+                    separatorBuilder: (_, _) => const Divider(height: 1),
                     itemBuilder: (_, i) {
                       final ad = _ads[i];
                       final img = (ad.thumbUrl ?? ad.imageUrl ?? '').trim();

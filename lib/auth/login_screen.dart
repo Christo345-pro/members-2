@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../core/theme/website_palette.dart';
 import '../dashboard/dashboard.dart';
 import '../services/admin_service.dart';
 
@@ -266,18 +267,30 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
           Image.asset(
             'assets/images/login.png',
             fit: BoxFit.cover,
-            errorBuilder: (_, __, ___) => Container(color: Colors.black),
+            errorBuilder: (_, _, _) => Container(color: WebsitePalette.bgTop),
           ),
-          Container(color: Colors.black.withOpacity(0.58)),
+          const DecoratedBox(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: [
+                  Color(0xC80B2233),
+                  Color(0xC00E2D44),
+                  Color(0xBC0F3B5A),
+                ],
+              ),
+            ),
+          ),
           Center(
             child: ConstrainedBox(
               constraints: const BoxConstraints(maxWidth: 540),
               child: Container(
                 padding: const EdgeInsets.all(26),
                 decoration: BoxDecoration(
-                  color: Colors.black.withOpacity(0.64),
+                  color: WebsitePalette.panel,
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: Colors.white.withOpacity(0.14)),
+                  border: Border.all(color: WebsitePalette.line),
                 ),
                 child: SingleChildScrollView(
                   child: Column(
@@ -288,10 +301,10 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                         'assets/images/icon.png',
                         height: 72,
                         width: 72,
-                        errorBuilder: (_, __, ___) => const Icon(
+                        errorBuilder: (_, _, _) => const Icon(
                           Icons.admin_panel_settings,
                           size: 64,
-                          color: Colors.amber,
+                          color: WebsitePalette.accent,
                         ),
                       ),
                       const SizedBox(height: 12),
@@ -301,7 +314,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                         style: TextStyle(
                           fontSize: 22,
                           fontWeight: FontWeight.bold,
-                          color: Colors.white,
+                          color: WebsitePalette.ink,
                         ),
                       ),
                       const SizedBox(height: 20),
@@ -350,7 +363,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                           const Expanded(
                             child: Text(
                               'Remember username',
-                              style: TextStyle(color: Colors.white70),
+                              style: TextStyle(color: WebsitePalette.inkSoft),
                             ),
                           ),
                           TextButton(
@@ -400,7 +413,7 @@ class _AdminLoginScreenState extends State<AdminLoginScreen> {
                         const SizedBox(height: 8),
                         Text(
                           _status!,
-                          style: const TextStyle(color: Colors.white70),
+                          style: const TextStyle(color: WebsitePalette.inkSoft),
                         ),
                       ],
                       const SizedBox(height: 10),
