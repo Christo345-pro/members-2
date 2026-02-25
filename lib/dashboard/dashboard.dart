@@ -79,6 +79,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
   bool _toolCreateAndroid = false;
   bool _toolCreateWindows = false;
   bool _toolCreateWeb = false;
+  bool _toolCreateSendPaymentLink = true;
+  String _toolCreateCheckoutPack = 'base';
   final _toolPasswordCtrl = TextEditingController();
   final _toolPasswordConfirmCtrl = TextEditingController();
 
@@ -596,6 +598,30 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _toolCreateAndroid = false;
     _toolCreateWindows = false;
     _toolCreateWeb = false;
+    _toolCreateSendPaymentLink = true;
+    _toolCreateCheckoutPack = 'base';
+  }
+
+  List<String> _paymentLinkLicenseTypesForCreateUser() {
+    final types = <String>[];
+
+    if (_toolCreateAndroid) {
+      types.add('home_hooligan_android');
+    }
+    if (_toolCreateWeb) {
+      types.add('home_hooligan_web');
+    }
+    if (types.isEmpty) {
+      // Default to Android base package when no device checkboxes were selected.
+      types.add('home_hooligan_android');
+    }
+
+    if (_toolCreateCheckoutPack == 'travel') {
+      types.add('ten_day_forecast');
+      types.add('swell_forecast');
+    }
+
+    return types;
   }
 
   Future<void> _runToolsAction() async {
@@ -640,9 +666,39 @@ class _AdminDashboardState extends State<AdminDashboard> {
           appWeb: _toolCreateWeb,
         );
 
-        _toast('User created: ${created.username}');
+        AdminPaymentLinkResult? paymentLinkResult;
+        String? paymentLinkError;
+        if (_toolCreateSendPaymentLink) {
+          try {
+            paymentLinkResult = await _service.createMemberPaymentLink(
+              userId: created.id,
+              licenseTypes: _paymentLinkLicenseTypesForCreateUser(),
+              sendEmail: true,
+            );
+          } catch (e) {
+            paymentLinkError = e.toString();
+          }
+        }
+
+        if ((paymentLinkError ?? '').trim().isNotEmpty) {
+          _toast('User created. Payment link failed: $paymentLinkError');
+        } else if (paymentLinkResult == null) {
+          _toast('User created: ${created.username}');
+        } else if (paymentLinkResult.hasMailWarning) {
+          _toast(
+            'User created. Payment link created, but email warning: ${paymentLinkResult.mailWarning}',
+          );
+        } else {
+          _toast(
+            'User created + payment link sent (${paymentLinkResult.invoice.invoiceNumber}).',
+          );
+        }
+
         _resetCreateUserToolForm();
         await _loadMembers();
+        if (paymentLinkResult != null) {
+          await _loadInvoices();
+        }
         if (!mounted) return;
         setState(() {
           _selectedMemberId = created.id;
@@ -2379,7 +2435,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
               Text('Tools', style: Theme.of(context).textTheme.headlineSmall),
               const SizedBox(height: 8),
               const Text(
-                'Create users, set member passwords, and block/unblock members.',
+                'Create users, send payment links, set member passwords, and block/unblock members.',
               ),
               const SizedBox(height: 14),
               Row(
@@ -2519,6 +2575,56 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         },
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Allow Web'),
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Wrap(
+                  spacing: 12,
+                  runSpacing: 8,
+                  crossAxisAlignment: WrapCrossAlignment.center,
+                  children: [
+                    SizedBox(
+                      width: 260,
+                      child: DropdownButtonFormField<String>(
+                        initialValue: _toolCreateCheckoutPack,
+                        decoration: const InputDecoration(
+                          labelText: 'Payment package',
+                          border: OutlineInputBorder(),
+                        ),
+                        items: const [
+                          DropdownMenuItem(
+                            value: 'base',
+                            child: Text('Base Package'),
+                          ),
+                          DropdownMenuItem(
+                            value: 'travel',
+                            child: Text('Travel Pack (Base + Add-ons)'),
+                          ),
+                        ],
+                        onChanged: _toolCreateSendPaymentLink
+                            ? (value) {
+                                if (value == null) return;
+                                setState(() => _toolCreateCheckoutPack = value);
+                              }
+                            : null,
+                      ),
+                    ),
+                    SizedBox(
+                      width: 300,
+                      child: CheckboxListTile(
+                        value: _toolCreateSendPaymentLink,
+                        onChanged: (value) {
+                          setState(
+                            () => _toolCreateSendPaymentLink = value == true,
+                          );
+                        },
+                        contentPadding: EdgeInsets.zero,
+                        title: const Text('Send payment link after create'),
+                        subtitle: const Text(
+                          'Creates checkout and emails the link immediately.',
+                        ),
                       ),
                     ),
                   ],
