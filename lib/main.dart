@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'auth/login_screen.dart';
+import 'core/theme/app_theme.dart';
 import 'services/admin_service.dart';
 
 void main() {
@@ -17,11 +18,7 @@ class HooliganAdminApp extends StatelessWidget {
     return MaterialApp(
       title: 'Hooligan Members Admin',
       debugShowCheckedModeBanner: false,
-      theme: ThemeData(
-        brightness: Brightness.dark,
-        primarySwatch: Colors.amber,
-        useMaterial3: true,
-      ),
+      theme: AppTheme.darkTheme,
       home: AdminLoginScreen(service: service),
     );
   }

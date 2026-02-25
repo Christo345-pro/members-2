@@ -503,7 +503,8 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
                             borderRadius: BorderRadius.circular(12),
                             color: inbound
                                 ? Colors.white10
-                                : Colors.amber.withValues(alpha: 0.20),
+                                : Theme.of(context).colorScheme.secondary
+                                      .withValues(alpha: 0.20),
                             border: Border.all(color: Colors.white12),
                           ),
                           child: Column(
