@@ -113,6 +113,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _invoiceDateCtrl = TextEditingController();
   String _invoiceMethodFilter = 'all';
   int? _activatingInvoiceId;
+  int? _sendingPaymentEmailInvoiceId;
+  int? _sendingWelcomeEmailInvoiceId;
 
   bool _callsLoading = false;
   String? _callsError;
@@ -1461,6 +1463,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
         status == 'initiated';
   }
 
+  bool _canSendInvoiceEmails(AdminInvoice invoice) {
+    final status = invoice.status.trim().toLowerCase();
+    return status == 'paid' || status == 'completed';
+  }
+
   Future<void> _activateEftInvoice(AdminInvoice invoice) async {
     if (_activatingInvoiceId != null) return;
 
@@ -1516,6 +1523,48 @@ class _AdminDashboardState extends State<AdminDashboard> {
       _toast('Activate EFT failed: $e');
     } finally {
       if (mounted) setState(() => _activatingInvoiceId = null);
+    }
+  }
+
+  Future<void> _sendPaymentInvoiceEmail(AdminInvoice invoice) async {
+    if (_sendingPaymentEmailInvoiceId != null) return;
+
+    setState(() => _sendingPaymentEmailInvoiceId = invoice.id);
+    try {
+      final updated = await _service.sendPaymentInvoiceEmail(
+        checkoutId: invoice.id,
+      );
+      if (!mounted) return;
+      setState(() {
+        _invoices = _invoices
+            .map((row) => row.id == updated.id ? updated : row)
+            .toList();
+      });
+      _toast('Payment email sent.');
+    } catch (e) {
+      _toast('Send payment email failed: $e');
+    } finally {
+      if (mounted) setState(() => _sendingPaymentEmailInvoiceId = null);
+    }
+  }
+
+  Future<void> _sendWelcomeEmail(AdminInvoice invoice) async {
+    if (_sendingWelcomeEmailInvoiceId != null) return;
+
+    setState(() => _sendingWelcomeEmailInvoiceId = invoice.id);
+    try {
+      final updated = await _service.sendWelcomeEmail(checkoutId: invoice.id);
+      if (!mounted) return;
+      setState(() {
+        _invoices = _invoices
+            .map((row) => row.id == updated.id ? updated : row)
+            .toList();
+      });
+      _toast('Welcome email sent.');
+    } catch (e) {
+      _toast('Send welcome email failed: $e');
+    } finally {
+      if (mounted) setState(() => _sendingWelcomeEmailInvoiceId = null);
     }
   }
 
@@ -3862,7 +3911,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         final invoice = visibleInvoices[i];
                         final methodLabel = _invoiceMethodLabel(invoice);
                         final canActivateEft = _canActivateEftInvoice(invoice);
+                        final canSendEmails = _canSendInvoiceEmails(invoice);
                         final activating = _activatingInvoiceId == invoice.id;
+                        final sendingPaymentEmail =
+                            _sendingPaymentEmailInvoiceId == invoice.id;
+                        final sendingWelcomeEmail =
+                            _sendingWelcomeEmailInvoiceId == invoice.id;
                         return ListTile(
                           leading: const Icon(Icons.receipt_long),
                           title: Text(
@@ -3900,6 +3954,36 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                           ),
                                         )
                                       : const Text('Activate account'),
+                                ),
+                              if (canSendEmails)
+                                TextButton(
+                                  onPressed: sendingPaymentEmail
+                                      ? null
+                                      : () => _sendPaymentInvoiceEmail(invoice),
+                                  child: sendingPaymentEmail
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Text('Send payment email'),
+                                ),
+                              if (canSendEmails)
+                                TextButton(
+                                  onPressed: sendingWelcomeEmail
+                                      ? null
+                                      : () => _sendWelcomeEmail(invoice),
+                                  child: sendingWelcomeEmail
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Text('Send welcome email'),
                                 ),
                               if ((invoice.checkoutUrl ?? '').trim().isNotEmpty)
                                 TextButton(
