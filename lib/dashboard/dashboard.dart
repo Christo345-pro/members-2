@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:url_launcher/url_launcher.dart';
@@ -20,6 +22,12 @@ class AdminDashboard extends StatefulWidget {
 class _AdminDashboardState extends State<AdminDashboard> {
   final _service = AdminService();
   final _waInboxKey = GlobalKey<WhatsAppMessagesPanelState>();
+  Timer? _waIncomingPollTimer;
+  bool _waIncomingPolling = false;
+  bool _waIncomingInitialized = false;
+  bool _waIncomingDialogOpen = false;
+  final Map<int, DateTime> _waLatestInboundAtByConversation = {};
+  final List<AdminWaConversation> _waPendingIncomingPopups = [];
 
   static const String _whatsAppDefaultCountryCode = String.fromEnvironment(
     'MEMBERS_WHATSAPP_DEFAULT_COUNTRY_CODE',
@@ -104,6 +112,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _invoiceSearchCtrl = TextEditingController();
   final _invoiceDateCtrl = TextEditingController();
   String _invoiceMethodFilter = 'all';
+  int? _activatingInvoiceId;
 
   bool _callsLoading = false;
   String? _callsError;
@@ -134,6 +143,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   void initState() {
     super.initState();
     _loadMembers();
+    _startWhatsAppIncomingPolling();
     if (supportsLocalDb) {
       _refreshLocalDbSummary();
     }
@@ -141,6 +151,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   @override
   void dispose() {
+    _stopWhatsAppIncomingPolling();
     _memberSearchCtrl.dispose();
     _memberNameCtrl.dispose();
     _memberAccountCtrl.dispose();
@@ -172,6 +183,172 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _callsSearchCtrl.dispose();
 
     super.dispose();
+  }
+
+  void _startWhatsAppIncomingPolling() {
+    _waIncomingPollTimer?.cancel();
+    _pollWhatsAppIncoming(showPopups: false);
+    _waIncomingPollTimer = Timer.periodic(const Duration(seconds: 8), (_) {
+      _pollWhatsAppIncoming();
+    });
+  }
+
+  void _stopWhatsAppIncomingPolling() {
+    _waIncomingPollTimer?.cancel();
+    _waIncomingPollTimer = null;
+  }
+
+  Future<void> _pollWhatsAppIncoming({bool showPopups = true}) async {
+    if (_waIncomingPolling) return;
+    _waIncomingPolling = true;
+
+    try {
+      final rows = await _service.fetchWaConversations(limit: 300);
+      final incoming = <AdminWaConversation>[];
+
+      for (final row in rows) {
+        final lastInbound = row.lastInboundAt;
+        if (lastInbound == null) continue;
+
+        final previous = _waLatestInboundAtByConversation[row.id];
+        _waLatestInboundAtByConversation[row.id] = lastInbound;
+
+        if (!showPopups || !_waIncomingInitialized) continue;
+
+        final isNewInbound = previous == null || lastInbound.isAfter(previous);
+        if (isNewInbound) {
+          incoming.add(row);
+        }
+      }
+
+      if (!_waIncomingInitialized) {
+        _waIncomingInitialized = true;
+        return;
+      }
+
+      if (incoming.isNotEmpty && mounted) {
+        _queueWhatsAppIncomingPopups(incoming);
+      }
+    } catch (_) {
+      // Keep this silent: inbox polling should not interrupt admin workflows.
+    } finally {
+      _waIncomingPolling = false;
+    }
+  }
+
+  void _queueWhatsAppIncomingPopups(List<AdminWaConversation> incoming) {
+    _waPendingIncomingPopups.addAll(incoming);
+    _showNextWhatsAppIncomingPopupIfNeeded();
+  }
+
+  Future<void> _showNextWhatsAppIncomingPopupIfNeeded() async {
+    if (!mounted || _waIncomingDialogOpen || _waPendingIncomingPopups.isEmpty) {
+      return;
+    }
+
+    _waIncomingDialogOpen = true;
+
+    final mergedByConversation = <int, AdminWaConversation>{};
+    for (final row in _waPendingIncomingPopups) {
+      final existing = mergedByConversation[row.id];
+      if (existing == null) {
+        mergedByConversation[row.id] = row;
+        continue;
+      }
+
+      final existingInbound = existing.lastInboundAt;
+      final currentInbound = row.lastInboundAt;
+      if (existingInbound == null) {
+        mergedByConversation[row.id] = row;
+      } else if (currentInbound != null &&
+          currentInbound.isAfter(existingInbound)) {
+        mergedByConversation[row.id] = row;
+      }
+    }
+    _waPendingIncomingPopups.clear();
+
+    final items = mergedByConversation.values.toList()
+      ..sort((a, b) {
+        final aTs = a.lastInboundAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        final bTs = b.lastInboundAt ?? DateTime.fromMillisecondsSinceEpoch(0);
+        return bTs.compareTo(aTs);
+      });
+
+    final topItems = items.take(4).toList();
+    final remaining = items.length - topItems.length;
+
+    final openInbox = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: Text(
+          items.length == 1
+              ? 'Incoming WhatsApp Message'
+              : 'Incoming WhatsApp Messages',
+        ),
+        content: SizedBox(
+          width: 520,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              for (final row in topItems)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 10),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(
+                        '${row.title} (${row.waUser})',
+                        style: const TextStyle(fontWeight: FontWeight.w700),
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        (row.lastMessagePreview ?? 'New message').trim(),
+                        maxLines: 2,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                      const SizedBox(height: 2),
+                      Text(
+                        'Received: ${_fmtDate(row.lastInboundAt)}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                    ],
+                  ),
+                ),
+              if (remaining > 0)
+                Text(
+                  '+$remaining more message(s)',
+                  style: Theme.of(context).textTheme.bodySmall,
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Dismiss'),
+          ),
+          FilledButton.icon(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            icon: const Icon(Icons.forum),
+            label: const Text('Open Inbox'),
+          ),
+        ],
+      ),
+    );
+
+    _waIncomingDialogOpen = false;
+
+    if (openInbox == true && mounted) {
+      setState(() => _tab = 7);
+      await _waInboxKey.currentState?.refreshAll();
+    }
+
+    if (mounted && _waPendingIncomingPopups.isNotEmpty) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        _showNextWhatsAppIncomingPopupIfNeeded();
+      });
+    }
   }
 
   void _toast(String message) {
@@ -1235,6 +1412,110 @@ class _AdminDashboardState extends State<AdminDashboard> {
       setState(() => _invoicesError = e.toString());
     } finally {
       if (mounted) setState(() => _invoicesLoading = false);
+    }
+  }
+
+  String _invoiceMethodToken(AdminInvoice invoice) {
+    final providerKey = (invoice.providerKey ?? '').trim().toLowerCase();
+    final paymentMethod = (invoice.paymentMethod ?? '').trim().toLowerCase();
+
+    if (providerKey == 'payfast' || paymentMethod.contains('payfast')) {
+      return 'payfast';
+    }
+    if (providerKey == 'ozow' || paymentMethod.contains('ozow')) return 'ozow';
+    if (providerKey == 'eft' ||
+        providerKey == 'direct_eft' ||
+        paymentMethod.contains('eft')) {
+      return 'eft';
+    }
+
+    if (providerKey.isNotEmpty) return providerKey;
+    if (paymentMethod.isNotEmpty) return paymentMethod;
+    return 'unknown';
+  }
+
+  String _invoiceMethodLabel(AdminInvoice invoice) {
+    final label = (invoice.paymentMethod ?? '').trim();
+    if (label.isNotEmpty) return label;
+
+    switch (_invoiceMethodToken(invoice)) {
+      case 'payfast':
+        return 'PayFast';
+      case 'ozow':
+        return 'Ozow';
+      case 'eft':
+        return 'Direct EFT';
+      case 'unknown':
+        return 'Unknown';
+      default:
+        return (invoice.providerKey ?? 'Unknown').trim();
+    }
+  }
+
+  bool _canActivateEftInvoice(AdminInvoice invoice) {
+    if (_invoiceMethodToken(invoice) != 'eft') return false;
+
+    final status = invoice.status.trim().toLowerCase();
+    return status == 'awaiting_eft' ||
+        status == 'pending' ||
+        status == 'initiated';
+  }
+
+  Future<void> _activateEftInvoice(AdminInvoice invoice) async {
+    if (_activatingInvoiceId != null) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Activate account?'),
+        content: Text(
+          'Mark ${invoice.invoiceNumber} as EFT paid and unlock ${invoice.username}.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Activate'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _activatingInvoiceId = invoice.id);
+    try {
+      final updated = await _service.activateEftInvoice(checkoutId: invoice.id);
+
+      if (!mounted) return;
+      setState(() {
+        _invoices = _invoices
+            .map((row) => row.id == updated.id ? updated : row)
+            .toList();
+      });
+
+      if (updated.userId > 0) {
+        final detail = await _service.fetchMemberDetail(updated.userId);
+        if (!mounted) return;
+
+        setState(() {
+          _members = _members
+              .map((member) => member.id == detail.id ? detail : member)
+              .toList();
+          if (_memberDetail?.id == detail.id) {
+            _memberDetail = detail;
+          }
+        });
+      }
+
+      _toast('Account activated for EFT payment.');
+    } catch (e) {
+      _toast('Activate EFT failed: $e');
+    } finally {
+      if (mounted) setState(() => _activatingInvoiceId = null);
     }
   }
 
@@ -3415,10 +3696,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final invoiceDate = _invoiceDateCtrl.text.trim().toLowerCase();
 
     final visibleInvoices = _invoices.where((invoice) {
-      var method = (invoice.paymentMethod ?? invoice.providerKey ?? '')
-          .trim()
-          .toLowerCase();
-      if (method.isEmpty) method = 'unknown';
+      final method = _invoiceMethodToken(invoice);
       final hay = [
         invoice.invoiceNumber,
         invoice.username,
@@ -3427,6 +3705,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         invoice.providerReference ?? '',
         invoice.token,
         method,
+        _invoiceMethodLabel(invoice),
         invoice.status,
       ].join(' ').toLowerCase();
 
@@ -3581,6 +3860,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       separatorBuilder: (_, index) => const Divider(height: 1),
                       itemBuilder: (_, i) {
                         final invoice = visibleInvoices[i];
+                        final methodLabel = _invoiceMethodLabel(invoice);
+                        final canActivateEft = _canActivateEftInvoice(invoice);
+                        final activating = _activatingInvoiceId == invoice.id;
                         return ListTile(
                           leading: const Icon(Icons.receipt_long),
                           title: Text(
@@ -3588,13 +3870,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           ),
                           subtitle: Text(
                             '${invoice.username} (${invoice.accountNumber ?? 'no account'})\n'
-                            'Status: ${invoice.status} • Method: ${invoice.paymentMethod ?? invoice.providerKey ?? 'Unknown'}\n'
+                            'Status: ${invoice.status} • Method: $methodLabel\n'
                             'Ref: ${invoice.providerReference ?? invoice.token}'
                             '${(invoice.billingCycle ?? '').trim().isEmpty ? '' : ' • Cycle: ${invoice.billingCycle}'}',
                           ),
                           isThreeLine: true,
                           trailing: Column(
                             mainAxisAlignment: MainAxisAlignment.center,
+                            crossAxisAlignment: CrossAxisAlignment.end,
                             children: [
                               Text(
                                 _fmtDate(
@@ -3603,6 +3886,21 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                       invoice.createdAt,
                                 ),
                               ),
+                              if (canActivateEft)
+                                TextButton(
+                                  onPressed: activating
+                                      ? null
+                                      : () => _activateEftInvoice(invoice),
+                                  child: activating
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Text('Activate account'),
+                                ),
                               if ((invoice.checkoutUrl ?? '').trim().isNotEmpty)
                                 TextButton(
                                   onPressed: () =>
