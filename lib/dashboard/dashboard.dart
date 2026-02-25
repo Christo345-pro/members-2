@@ -117,6 +117,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   int? _activatingInvoiceId;
   int? _sendingPaymentEmailInvoiceId;
   int? _sendingWelcomeEmailInvoiceId;
+  int? _sendingMemberPaymentLinkUserId;
 
   bool _callsLoading = false;
   String? _callsError;
@@ -624,6 +625,198 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return types;
   }
 
+  List<String> _paymentLinkLicenseTypes({
+    required bool includeAndroid,
+    required bool includeWeb,
+    required String checkoutPack,
+  }) {
+    final types = <String>[];
+
+    if (includeAndroid) {
+      types.add('home_hooligan_android');
+    }
+    if (includeWeb) {
+      types.add('home_hooligan_web');
+    }
+    if (types.isEmpty) {
+      types.add('home_hooligan_android');
+    }
+
+    if (checkoutPack == 'travel') {
+      types.add('ten_day_forecast');
+      types.add('swell_forecast');
+    }
+
+    return types;
+  }
+
+  Future<void> _sendMemberPaymentLink(AdminUser user) async {
+    if (_sendingMemberPaymentLinkUserId != null) return;
+    if (user.isBlocked) {
+      _toast('Unblock this user first before sending payment link.');
+      return;
+    }
+
+    final waDigits = _normalizeWhatsappDigits((user.whatsapp ?? '').trim());
+    if (waDigits == null) {
+      _toast('Invalid WhatsApp number on this member profile.');
+      return;
+    }
+
+    final defaultPack = (user.plan ?? '').trim().toLowerCase() == 'travel'
+        ? 'travel'
+        : 'base';
+    final defaultWeb = user.appWeb == true;
+    final defaultAndroid = user.appAndroid == true || !defaultWeb;
+
+    final options = await showDialog<Map<String, dynamic>>(
+      context: context,
+      builder: (dialogContext) {
+        var checkoutPack = defaultPack;
+        var includeAndroid = defaultAndroid;
+        var includeWeb = defaultWeb;
+
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Send Payment Link'),
+              content: SizedBox(
+                width: 420,
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Member: ${user.username}'),
+                    const SizedBox(height: 10),
+                    DropdownButtonFormField<String>(
+                      initialValue: checkoutPack,
+                      decoration: const InputDecoration(
+                        labelText: 'Payment package',
+                        border: OutlineInputBorder(),
+                      ),
+                      items: const [
+                        DropdownMenuItem(
+                          value: 'base',
+                          child: Text('Base Package'),
+                        ),
+                        DropdownMenuItem(
+                          value: 'travel',
+                          child: Text('Travel Pack (Base + Add-ons)'),
+                        ),
+                      ],
+                      onChanged: (value) {
+                        if (value == null) return;
+                        setDialogState(() => checkoutPack = value);
+                      },
+                    ),
+                    const SizedBox(height: 10),
+                    CheckboxListTile(
+                      value: includeAndroid,
+                      onChanged: (value) {
+                        setDialogState(() => includeAndroid = value == true);
+                      },
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Android base'),
+                    ),
+                    CheckboxListTile(
+                      value: includeWeb,
+                      onChanged: (value) {
+                        setDialogState(() => includeWeb = value == true);
+                      },
+                      contentPadding: EdgeInsets.zero,
+                      title: const Text('Web base'),
+                    ),
+                    const SizedBox(height: 4),
+                    const Text(
+                      'The system will create checkout + send the payment link via WhatsApp webhook.',
+                      style: TextStyle(fontSize: 12),
+                    ),
+                  ],
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    if (!includeAndroid && !includeWeb) {
+                      ScaffoldMessenger.of(context).showSnackBar(
+                        const SnackBar(
+                          content: Text(
+                            'Select at least one base option: Android or Web.',
+                          ),
+                        ),
+                      );
+                      return;
+                    }
+                    Navigator.pop(dialogContext, {
+                      'checkout_pack': checkoutPack,
+                      'include_android': includeAndroid,
+                      'include_web': includeWeb,
+                    });
+                  },
+                  child: const Text('Send Link'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (options == null) return;
+
+    final checkoutPack = (options['checkout_pack'] ?? 'base')
+        .toString()
+        .trim()
+        .toLowerCase();
+    final includeAndroid = options['include_android'] == true;
+    final includeWeb = options['include_web'] == true;
+    final licenseTypes = _paymentLinkLicenseTypes(
+      includeAndroid: includeAndroid,
+      includeWeb: includeWeb,
+      checkoutPack: checkoutPack == 'travel' ? 'travel' : 'base',
+    );
+
+    setState(() => _sendingMemberPaymentLinkUserId = user.id);
+    try {
+      final result = await _service.createMemberPaymentLink(
+        userId: user.id,
+        licenseTypes: licenseTypes,
+        sendEmail: false,
+      );
+
+      await _service.sendWaMessage(
+        waUser: waDigits,
+        body: _paymentLinkWhatsAppMessage(user: user, invoice: result.invoice),
+      );
+
+      _toast(
+        'Payment link sent via WhatsApp webhook (${result.invoice.invoiceNumber}).',
+      );
+
+      await _loadInvoices();
+      await _waInboxKey.currentState?.refreshAll();
+
+      final detail = await _service.fetchMemberDetail(user.id);
+      if (!mounted) return;
+      setState(() {
+        _members = _members
+            .map((member) => member.id == detail.id ? detail : member)
+            .toList();
+        if (_memberDetail?.id == detail.id) {
+          _memberDetail = detail;
+        }
+      });
+    } catch (e) {
+      _toast('Send payment link failed: $e');
+    } finally {
+      if (mounted) setState(() => _sendingMemberPaymentLinkUserId = null);
+    }
+  }
+
   Future<void> _runToolsAction() async {
     if (_toolsBusy) return;
 
@@ -669,28 +862,44 @@ class _AdminDashboardState extends State<AdminDashboard> {
         AdminPaymentLinkResult? paymentLinkResult;
         String? paymentLinkError;
         if (_toolCreateSendPaymentLink) {
-          try {
-            paymentLinkResult = await _service.createMemberPaymentLink(
-              userId: created.id,
-              licenseTypes: _paymentLinkLicenseTypesForCreateUser(),
-              sendEmail: true,
-            );
-          } catch (e) {
-            paymentLinkError = e.toString();
+          final waDigits = _normalizeWhatsappDigits(created.whatsapp);
+          if (waDigits == null) {
+            paymentLinkError =
+                'Missing/invalid WhatsApp number. Could not send payment link webhook.';
+          } else {
+            try {
+              paymentLinkResult = await _service.createMemberPaymentLink(
+                userId: created.id,
+                licenseTypes: _paymentLinkLicenseTypesForCreateUser(),
+                sendEmail: false,
+              );
+              await _service.sendWaMessage(
+                waUser: waDigits,
+                body: _paymentLinkWhatsAppMessage(
+                  user: created,
+                  invoice: paymentLinkResult.invoice,
+                ),
+              );
+            } catch (e) {
+              paymentLinkError = e.toString();
+            }
           }
         }
 
-        if ((paymentLinkError ?? '').trim().isNotEmpty) {
-          _toast('User created. Payment link failed: $paymentLinkError');
+        if ((paymentLinkError ?? '').trim().isNotEmpty &&
+            paymentLinkResult != null) {
+          _toast(
+            'User created. Checkout ${paymentLinkResult.invoice.invoiceNumber} created, but WhatsApp send failed: $paymentLinkError',
+          );
+        } else if ((paymentLinkError ?? '').trim().isNotEmpty) {
+          _toast(
+            'User created. Payment link WhatsApp send failed: $paymentLinkError',
+          );
         } else if (paymentLinkResult == null) {
           _toast('User created: ${created.username}');
-        } else if (paymentLinkResult.hasMailWarning) {
-          _toast(
-            'User created. Payment link created, but email warning: ${paymentLinkResult.mailWarning}',
-          );
         } else {
           _toast(
-            'User created + payment link sent (${paymentLinkResult.invoice.invoiceNumber}).',
+            'User created + payment link sent via WhatsApp (${paymentLinkResult.invoice.invoiceNumber}).',
           );
         }
 
@@ -698,6 +907,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         await _loadMembers();
         if (paymentLinkResult != null) {
           await _loadInvoices();
+          await _waInboxKey.currentState?.refreshAll();
         }
         if (!mounted) return;
         setState(() {
@@ -1735,6 +1945,31 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return template.replaceAll('{name}', displayName);
   }
 
+  String _paymentLinkWhatsAppMessage({
+    required AdminUser user,
+    required AdminInvoice invoice,
+  }) {
+    final displayName = '${user.name ?? ''} ${user.surname ?? ''}'.trim();
+    final firstName = displayName.isEmpty
+        ? user.username
+        : displayName.split(RegExp(r'\s+')).first;
+    final amount = invoice.totalAmount.toStringAsFixed(2);
+    final currency = invoice.currency.trim().isEmpty ? 'ZAR' : invoice.currency;
+    final paymentUrl = (invoice.checkoutUrl ?? '').trim();
+
+    final lines = <String>[
+      'Hi $firstName, your Weather Hooligan payment link is ready.',
+      'Invoice: ${invoice.invoiceNumber}',
+      'Amount: $amount $currency',
+    ];
+    if (paymentUrl.isNotEmpty) {
+      lines.add('Pay here: $paymentUrl');
+    }
+    lines.add('Reply here if you need help.');
+
+    return lines.join('\n');
+  }
+
   Future<void> _sendMemberWhatsAppViaCloud(AdminUser user) async {
     final rawPhone = (user.whatsapp ?? '').trim();
     final waDigits = _normalizeWhatsappDigits(rawPhone);
@@ -2324,6 +2559,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
   Widget _memberDetailPanel(AdminUser user) {
     final whatsappRaw = (user.whatsapp ?? '').trim();
     final canMessageOnWhatsApp = whatsappRaw.isNotEmpty;
+    final sendingPaymentLink = _sendingMemberPaymentLinkUserId == user.id;
+    final canSendPaymentLink =
+        _normalizeWhatsappDigits(whatsappRaw) != null && !user.isBlocked;
 
     return ListView(
       padding: const EdgeInsets.all(14),
@@ -2364,15 +2602,33 @@ class _AdminDashboardState extends State<AdminDashboard> {
           ],
         ),
         const SizedBox(height: 10),
-        Align(
-          alignment: Alignment.centerLeft,
-          child: FilledButton.icon(
-            onPressed: canMessageOnWhatsApp
-                ? () => _sendMemberWhatsAppViaCloud(user)
-                : null,
-            icon: const Icon(Icons.chat),
-            label: const Text('Send WhatsApp (Cloud)'),
-          ),
+        Wrap(
+          spacing: 10,
+          runSpacing: 8,
+          children: [
+            FilledButton.icon(
+              onPressed: canMessageOnWhatsApp
+                  ? () => _sendMemberWhatsAppViaCloud(user)
+                  : null,
+              icon: const Icon(Icons.chat),
+              label: const Text('Send WhatsApp (Cloud)'),
+            ),
+            FilledButton.icon(
+              onPressed: sendingPaymentLink || !canSendPaymentLink
+                  ? null
+                  : () => _sendMemberPaymentLink(user),
+              icon: sendingPaymentLink
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.link),
+              label: Text(
+                sendingPaymentLink ? 'Sending link...' : 'Send Payment Link',
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 14),
         const Divider(),
@@ -2623,7 +2879,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         contentPadding: EdgeInsets.zero,
                         title: const Text('Send payment link after create'),
                         subtitle: const Text(
-                          'Creates checkout and emails the link immediately.',
+                          'Creates checkout and sends link via WhatsApp webhook.',
                         ),
                       ),
                     ),
