@@ -751,6 +751,56 @@ class AdminService {
     );
   }
 
+  Future<AdminInvoice> sendPaymentInvoiceEmail({
+    required int checkoutId,
+  }) async {
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/invoices/$checkoutId/send-payment-email',
+    );
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: '{}')
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final invoiceRaw = body is Map ? body['invoice'] : null;
+      if (invoiceRaw is Map) {
+        return AdminInvoice.fromJson(invoiceRaw.cast<String, dynamic>());
+      }
+      throw Exception('Payment email sent but invoice payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to send payment email (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminInvoice> sendWelcomeEmail({required int checkoutId}) async {
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/invoices/$checkoutId/send-welcome-email',
+    );
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: '{}')
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final invoiceRaw = body is Map ? body['invoice'] : null;
+      if (invoiceRaw is Map) {
+        return AdminInvoice.fromJson(invoiceRaw.cast<String, dynamic>());
+      }
+      throw Exception('Welcome email sent but invoice payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to send welcome email (${res.statusCode}).',
+    );
+  }
+
   Future<List<AdminWhatsAppCall>> fetchWhatsAppCalls({
     String adminStatus = 'all',
     String callStatus = 'all',
