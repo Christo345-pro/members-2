@@ -3917,82 +3917,100 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             _sendingPaymentEmailInvoiceId == invoice.id;
                         final sendingWelcomeEmail =
                             _sendingWelcomeEmailInvoiceId == invoice.id;
+                        final invoiceDateText = _fmtDate(
+                          invoice.paidAt ??
+                              invoice.completedAt ??
+                              invoice.createdAt,
+                        );
+
+                        final actions = <Widget>[];
+                        if (canActivateEft) {
+                          actions.add(
+                            TextButton(
+                              onPressed: activating
+                                  ? null
+                                  : () => _activateEftInvoice(invoice),
+                              child: activating
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text('Activate account'),
+                            ),
+                          );
+                        }
+                        if (canSendEmails) {
+                          actions.add(
+                            TextButton(
+                              onPressed: sendingPaymentEmail
+                                  ? null
+                                  : () => _sendPaymentInvoiceEmail(invoice),
+                              child: sendingPaymentEmail
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text('Send payment email'),
+                            ),
+                          );
+                          actions.add(
+                            TextButton(
+                              onPressed: sendingWelcomeEmail
+                                  ? null
+                                  : () => _sendWelcomeEmail(invoice),
+                              child: sendingWelcomeEmail
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text('Send welcome email'),
+                            ),
+                          );
+                        }
+                        if ((invoice.checkoutUrl ?? '').trim().isNotEmpty) {
+                          actions.add(
+                            TextButton(
+                              onPressed: () =>
+                                  _openExternal(invoice.checkoutUrl!),
+                              child: const Text('Open'),
+                            ),
+                          );
+                        }
+
                         return ListTile(
                           leading: const Icon(Icons.receipt_long),
                           title: Text(
                             '${invoice.invoiceNumber} • ${invoice.totalAmount.toStringAsFixed(2)} ${invoice.currency}',
                           ),
-                          subtitle: Text(
-                            '${invoice.username} (${invoice.accountNumber ?? 'no account'})\n'
-                            'Status: ${invoice.status} • Method: $methodLabel\n'
-                            'Ref: ${invoice.providerReference ?? invoice.token}'
-                            '${(invoice.billingCycle ?? '').trim().isEmpty ? '' : ' • Cycle: ${invoice.billingCycle}'}',
-                          ),
-                          isThreeLine: true,
-                          trailing: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            crossAxisAlignment: CrossAxisAlignment.end,
+                          subtitle: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Text(
-                                _fmtDate(
-                                  invoice.paidAt ??
-                                      invoice.completedAt ??
-                                      invoice.createdAt,
-                                ),
+                                '${invoice.username} (${invoice.accountNumber ?? 'no account'})\n'
+                                'Status: ${invoice.status} • Method: $methodLabel\n'
+                                'Ref: ${invoice.providerReference ?? invoice.token}'
+                                '${(invoice.billingCycle ?? '').trim().isEmpty ? '' : ' • Cycle: ${invoice.billingCycle}'}',
                               ),
-                              if (canActivateEft)
-                                TextButton(
-                                  onPressed: activating
-                                      ? null
-                                      : () => _activateEftInvoice(invoice),
-                                  child: activating
-                                      ? const SizedBox(
-                                          width: 14,
-                                          height: 14,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                          ),
-                                        )
-                                      : const Text('Activate account'),
+                              if (actions.isNotEmpty) ...[
+                                const SizedBox(height: 4),
+                                Wrap(
+                                  spacing: 8,
+                                  runSpacing: 0,
+                                  children: actions,
                                 ),
-                              if (canSendEmails)
-                                TextButton(
-                                  onPressed: sendingPaymentEmail
-                                      ? null
-                                      : () => _sendPaymentInvoiceEmail(invoice),
-                                  child: sendingPaymentEmail
-                                      ? const SizedBox(
-                                          width: 14,
-                                          height: 14,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                          ),
-                                        )
-                                      : const Text('Send payment email'),
-                                ),
-                              if (canSendEmails)
-                                TextButton(
-                                  onPressed: sendingWelcomeEmail
-                                      ? null
-                                      : () => _sendWelcomeEmail(invoice),
-                                  child: sendingWelcomeEmail
-                                      ? const SizedBox(
-                                          width: 14,
-                                          height: 14,
-                                          child: CircularProgressIndicator(
-                                            strokeWidth: 2,
-                                          ),
-                                        )
-                                      : const Text('Send welcome email'),
-                                ),
-                              if ((invoice.checkoutUrl ?? '').trim().isNotEmpty)
-                                TextButton(
-                                  onPressed: () =>
-                                      _openExternal(invoice.checkoutUrl!),
-                                  child: const Text('Open'),
-                                ),
+                              ],
                             ],
                           ),
+                          trailing: Text(invoiceDateText),
                         );
                       },
                     ),
