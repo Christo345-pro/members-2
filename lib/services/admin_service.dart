@@ -722,6 +722,35 @@ class AdminService {
     );
   }
 
+  Future<AdminInvoice> activateEftInvoice({
+    required int checkoutId,
+    String? reference,
+  }) async {
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/invoices/$checkoutId/activate-eft',
+    );
+    final payload = <String, dynamic>{
+      if ((reference ?? '').trim().isNotEmpty) 'reference': reference!.trim(),
+    };
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final invoiceRaw = body is Map ? body['invoice'] : null;
+      if (invoiceRaw is Map) {
+        return AdminInvoice.fromJson(invoiceRaw.cast<String, dynamic>());
+      }
+      throw Exception('Activation succeeded but invoice payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ?? 'Failed to activate EFT (${res.statusCode}).',
+    );
+  }
+
   Future<List<AdminWhatsAppCall>> fetchWhatsAppCalls({
     String adminStatus = 'all',
     String callStatus = 'all',
