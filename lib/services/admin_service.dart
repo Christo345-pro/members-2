@@ -1085,6 +1085,7 @@ class AdminService {
     int? conversationId,
     String? waUser,
     required String body,
+    String? headerImageUrl,
   }) async {
     final cleanBody = body.trim();
     if (cleanBody.isEmpty) {
@@ -1098,6 +1099,8 @@ class AdminService {
       'body': cleanBody,
       if ((conversationId ?? 0) > 0) 'conversation_id': conversationId,
       if ((waUser ?? '').trim().isNotEmpty) 'wa_user': waUser!.trim(),
+      if ((headerImageUrl ?? '').trim().isNotEmpty)
+        'header_image_url': headerImageUrl!.trim(),
     };
 
     final uri = Uri.parse('$_baseUrl/api/wa/messages/send');
@@ -1112,6 +1115,65 @@ class AdminService {
       _extractMessage(resBody) ??
           'Failed to send WhatsApp message (${res.statusCode}).',
     );
+  }
+
+  Future<String> uploadWaTemplateImage({
+    required Uint8List imageBytes,
+    required String imageName,
+    String? caption,
+  }) async {
+    if (imageBytes.isEmpty) {
+      throw Exception('Image file is empty.');
+    }
+
+    final t = (_token ?? '').trim();
+    if (t.isEmpty) throw Exception('No admin token set. Please login again.');
+
+    final uri = Uri.parse('$_baseUrl/api/admin/media/upload');
+    final req = http.MultipartRequest('POST', uri);
+
+    req.headers['Accept'] = 'application/json';
+    req.headers['Authorization'] = 'Bearer $t';
+    req.fields['type'] = 'hooligan_photo';
+    if ((caption ?? '').trim().isNotEmpty) {
+      req.fields['caption'] = caption!.trim();
+    }
+
+    req.files.add(
+      http.MultipartFile.fromBytes(
+        'file',
+        imageBytes,
+        filename: imageName,
+        contentType: _imageMediaTypeForFileName(imageName),
+      ),
+    );
+
+    final streamed = await req.send();
+    final res = await http.Response.fromStream(streamed);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode < 200 || res.statusCode >= 300) {
+      throw Exception(
+        _extractMessage(body) ??
+            'Failed to upload WhatsApp template image (${res.statusCode}).',
+      );
+    }
+
+    if (body is Map) {
+      final dataRaw = body['data'];
+      if (dataRaw is Map) {
+        final data = dataRaw.cast<String, dynamic>();
+        final mediaUrl = (data['url'] ?? '').toString().trim();
+        if (mediaUrl.isNotEmpty) return mediaUrl;
+
+        final mediaId = (data['id'] ?? '').toString().trim();
+        if (mediaId.isNotEmpty) {
+          return '$_baseUrl/api/media/file/$mediaId';
+        }
+      }
+    }
+
+    throw Exception('Image upload succeeded, but media URL is missing.');
   }
 
   Future<AdminWhatsAppCall> setWhatsAppCallStatus({

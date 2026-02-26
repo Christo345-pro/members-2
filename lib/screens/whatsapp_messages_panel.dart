@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 
 import '../models/admin_models.dart';
@@ -18,6 +19,18 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
   final TextEditingController _searchCtrl = TextEditingController();
   final TextEditingController _composerCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
+  PlatformFile? _composerImage;
+
+  static const List<String> _quickEmojis = <String>[
+    '🙂',
+    '👍',
+    '❤️',
+    '🔥',
+    '✅',
+    '🙏',
+    '🎉',
+    '⚠️',
+  ];
 
   Timer? _listPollTimer;
   Timer? _threadPollTimer;
@@ -188,8 +201,9 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
     if (_sending) return;
 
     final text = _composerCtrl.text.trim();
-    if (text.isEmpty) {
-      _toast('Type a message first.');
+    final hasImage = (_composerImage?.bytes?.isNotEmpty ?? false);
+    if (text.isEmpty && !hasImage) {
+      _toast('Type a message or pick an image first.');
       return;
     }
 
@@ -201,8 +215,25 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
 
     setState(() => _sending = true);
     try {
-      await _service.sendWaMessage(conversationId: conversation.id, body: text);
+      String? headerImageUrl;
+      if (hasImage) {
+        final image = _composerImage!;
+        headerImageUrl = await _service.uploadWaTemplateImage(
+          imageBytes: image.bytes!,
+          imageName: image.name,
+          caption: text.isEmpty ? null : text,
+        );
+      }
+
+      await _service.sendWaMessage(
+        conversationId: conversation.id,
+        body: text.isEmpty ? '[image]' : text,
+        headerImageUrl: headerImageUrl,
+      );
       _composerCtrl.clear();
+      if (mounted) {
+        setState(() => _composerImage = null);
+      }
       await _loadMessages(silent: true);
       await _loadConversations(silent: true);
       _scrollToBottom();
@@ -211,6 +242,45 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
     } finally {
       if (mounted) setState(() => _sending = false);
     }
+  }
+
+  Future<void> _pickComposerImage() async {
+    if (_sending) return;
+
+    try {
+      final result = await FilePicker.platform.pickFiles(
+        withData: true,
+        type: FileType.custom,
+        allowedExtensions: const ['jpg', 'jpeg', 'png', 'webp'],
+      );
+      if (result == null || result.files.isEmpty) return;
+
+      final file = result.files.first;
+      if (file.bytes == null || file.bytes!.isEmpty) {
+        _toast('Selected image is empty or unreadable.');
+        return;
+      }
+
+      setState(() => _composerImage = file);
+    } catch (e) {
+      _toast('Image pick failed: $e');
+    }
+  }
+
+  void _insertEmoji(String emoji) {
+    final current = _composerCtrl.value;
+    final text = current.text;
+    final start = current.selection.start < 0
+        ? text.length
+        : current.selection.start;
+    final end = current.selection.end < 0 ? start : current.selection.end;
+    final next = text.replaceRange(start, end, emoji);
+    final cursor = start + emoji.length;
+
+    _composerCtrl.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: cursor),
+    );
   }
 
   void _scrollToBottom() {
@@ -648,30 +718,99 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
         const Divider(height: 1),
         Padding(
           padding: const EdgeInsets.all(12),
-          child: Row(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(
-                child: TextField(
-                  controller: _composerCtrl,
-                  minLines: 1,
-                  maxLines: 4,
-                  decoration: const InputDecoration(
-                    labelText: 'Type a reply',
-                    border: OutlineInputBorder(),
+              if (_composerImage != null)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 8),
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: 10,
+                      vertical: 8,
+                    ),
+                    decoration: BoxDecoration(
+                      color: Colors.white10,
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.white12),
+                    ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.image_outlined, size: 18),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            _composerImage!.name,
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                        IconButton(
+                          tooltip: 'Remove image',
+                          onPressed: _sending
+                              ? null
+                              : () => setState(() => _composerImage = null),
+                          icon: const Icon(Icons.close),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-              const SizedBox(width: 10),
-              FilledButton.icon(
-                onPressed: _sending ? null : _sendMessage,
-                icon: _sending
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.send),
-                label: Text(_sending ? 'Sending...' : 'Send'),
+              Row(
+                children: [
+                  PopupMenuButton<String>(
+                    tooltip: 'Insert emoji',
+                    onSelected: _insertEmoji,
+                    itemBuilder: (_) {
+                      return _quickEmojis
+                          .map(
+                            (emoji) => PopupMenuItem<String>(
+                              value: emoji,
+                              child: Text(
+                                emoji,
+                                style: const TextStyle(fontSize: 22),
+                              ),
+                            ),
+                          )
+                          .toList();
+                    },
+                    child: const Padding(
+                      padding: EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 8,
+                      ),
+                      child: Icon(Icons.emoji_emotions_outlined),
+                    ),
+                  ),
+                  IconButton(
+                    tooltip: 'Pick image',
+                    onPressed: _sending ? null : _pickComposerImage,
+                    icon: const Icon(Icons.image_outlined),
+                  ),
+                  Expanded(
+                    child: TextField(
+                      controller: _composerCtrl,
+                      minLines: 1,
+                      maxLines: 4,
+                      decoration: const InputDecoration(
+                        labelText: 'Type a reply',
+                        border: OutlineInputBorder(),
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 10),
+                  FilledButton.icon(
+                    onPressed: _sending ? null : _sendMessage,
+                    icon: _sending
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.send),
+                    label: Text(_sending ? 'Sending...' : 'Send'),
+                  ),
+                ],
               ),
             ],
           ),
