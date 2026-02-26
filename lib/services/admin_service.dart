@@ -65,6 +65,7 @@ class AdminService {
   static void setToken(String token) => _token = token.trim();
   static String? get token => _token;
   static bool get hasToken => (_token ?? '').trim().isNotEmpty;
+  static String get baseUrl => _baseUrl;
 
   Map<String, String> _headers({
     bool jsonBody = false,
@@ -80,6 +81,22 @@ class AdminService {
       if (requireAuth) 'Authorization': 'Bearer $t',
       if (jsonBody) 'Content-Type': 'application/json',
     };
+  }
+
+  Map<String, String> mediaRequestHeaders() => _headers();
+
+  String resolveApiUrl(String pathOrUrl) {
+    final raw = pathOrUrl.trim();
+    if (raw.isEmpty) {
+      throw Exception('Empty API path.');
+    }
+
+    if (raw.startsWith('http://') || raw.startsWith('https://')) {
+      return raw;
+    }
+
+    final path = raw.startsWith('/') ? raw : '/$raw';
+    return '$_baseUrl$path';
   }
 
   Future<void> loginWithPin({

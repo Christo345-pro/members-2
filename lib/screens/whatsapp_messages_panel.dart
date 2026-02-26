@@ -227,6 +227,125 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
     return dt.toLocal().toString().split('.').first;
   }
 
+  String _messageMainText(AdminWaMessage message) {
+    final body = (message.body ?? '').trim();
+    if (body.isNotEmpty) return body;
+
+    final caption = (message.media?.caption ?? '').trim();
+    if (caption.isNotEmpty) return caption;
+
+    return '[${message.type}]';
+  }
+
+  Future<void> _openImagePreview({
+    required String mediaUrl,
+    required Map<String, String> headers,
+  }) async {
+    if (!mounted) return;
+
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) {
+        final size = MediaQuery.of(ctx).size;
+
+        return Dialog(
+          child: SizedBox(
+            width: size.width * 0.9,
+            height: size.height * 0.8,
+            child: Column(
+              children: [
+                Row(
+                  children: [
+                    const SizedBox(width: 12),
+                    const Expanded(child: Text('WhatsApp image')),
+                    IconButton(
+                      tooltip: 'Close',
+                      onPressed: () => Navigator.of(ctx).pop(),
+                      icon: const Icon(Icons.close),
+                    ),
+                  ],
+                ),
+                const Divider(height: 1),
+                Expanded(
+                  child: InteractiveViewer(
+                    minScale: 0.8,
+                    maxScale: 4,
+                    child: Image.network(
+                      mediaUrl,
+                      headers: headers,
+                      fit: BoxFit.contain,
+                      errorBuilder: (_, error, stackTrace) {
+                        return const Padding(
+                          padding: EdgeInsets.all(24),
+                          child: Text('Could not load image preview.'),
+                        );
+                      },
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildMessageMedia(AdminWaMessage message) {
+    final media = message.media;
+    if (media == null) return const SizedBox.shrink();
+
+    final downloadPath = (media.downloadPath ?? '').trim();
+    if (downloadPath.isEmpty) return const SizedBox.shrink();
+
+    if (!media.isImage) {
+      return Padding(
+        padding: const EdgeInsets.only(top: 8),
+        child: Text(
+          'Media attached (${media.type}).',
+          style: Theme.of(context).textTheme.bodySmall,
+        ),
+      );
+    }
+
+    final mediaUrl = _service.resolveApiUrl(downloadPath);
+    final headers = _service.mediaRequestHeaders();
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          ClipRRect(
+            borderRadius: BorderRadius.circular(10),
+            child: ConstrainedBox(
+              constraints: const BoxConstraints(maxHeight: 220, minWidth: 120),
+              child: Image.network(
+                mediaUrl,
+                headers: headers,
+                fit: BoxFit.cover,
+                errorBuilder: (_, error, stackTrace) {
+                  return Container(
+                    color: Colors.black12,
+                    padding: const EdgeInsets.all(12),
+                    child: const Text('Image preview unavailable.'),
+                  );
+                },
+              ),
+            ),
+          ),
+          const SizedBox(height: 6),
+          OutlinedButton.icon(
+            onPressed: () =>
+                _openImagePreview(mediaUrl: mediaUrl, headers: headers),
+            icon: const Icon(Icons.open_in_full),
+            label: const Text('View image'),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildWindowStatusBadge(bool within24HourWindow) {
     final label = within24HourWindow ? '24h open' : 'Template only';
     final bg = within24HourWindow
@@ -510,11 +629,8 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
                           child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
-                              Text(
-                                (message.body ?? '').trim().isEmpty
-                                    ? '[${message.type}]'
-                                    : message.body!,
-                              ),
+                              Text(_messageMainText(message)),
+                              _buildMessageMedia(message),
                               const SizedBox(height: 6),
                               Text(
                                 '${inbound ? 'Inbound' : 'Outbound'} • ${message.type} • ${_fmtDate(message.timestamp)}'
