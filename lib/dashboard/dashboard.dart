@@ -12,6 +12,13 @@ import '../services/admin_service.dart';
 import '../services/local_member_db_stub.dart'
     if (dart.library.io) '../services/local_member_db.dart';
 
+class _MemberStatusChipConfig {
+  final String label;
+  final IconData icon;
+
+  const _MemberStatusChipConfig({required this.label, required this.icon});
+}
+
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
 
@@ -618,6 +625,17 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return null;
   }
 
+  _MemberStatusChipConfig _memberAccountChip(AdminUser user) {
+    if (user.isBlocked) {
+      return const _MemberStatusChipConfig(label: 'INACTIVE', icon: Icons.lock);
+    }
+
+    return const _MemberStatusChipConfig(
+      label: 'ACTIVE',
+      icon: Icons.check_circle,
+    );
+  }
+
   void _resetCreateUserToolForm() {
     _toolCreateUsernameCtrl.clear();
     _toolCreateEmailCtrl.clear();
@@ -719,10 +737,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   Future<void> _sendMemberPaymentLink(AdminUser user) async {
     if (_sendingMemberPaymentLinkUserId != null) return;
-    if (user.isBlocked) {
-      _toast('Unblock this user first before sending payment link.');
-      return;
-    }
 
     final waDigits = _normalizeWhatsappDigits((user.whatsapp ?? '').trim());
     if (waDigits == null) {
@@ -1001,12 +1015,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
           _toast('Username, email and name are required.');
           return;
         }
-        if (_toolCreateSendPaymentLink && _toolCreateBlocked) {
-          _toast(
-            'Cannot send payment link while "Create as blocked" is enabled.',
-          );
-          return;
-        }
         if (_toolCreateSendPaymentLink &&
             !_toolCreateCheckoutAndroid &&
             !_toolCreateCheckoutWeb) {
@@ -1137,7 +1145,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
       if (_toolsAction == 'Toggle block') {
         final blocked = await _service.toggleMemberBlock(targetId);
-        _toast(blocked ? 'User blocked.' : 'User unblocked.');
+        _toast(blocked ? 'User inactive.' : 'User active.');
         await _loadMembers();
         if (!mounted) return;
         setState(() {
@@ -2766,8 +2774,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     final whatsappRaw = (user.whatsapp ?? '').trim();
     final canMessageOnWhatsApp = whatsappRaw.isNotEmpty;
     final sendingPaymentLink = _sendingMemberPaymentLinkUserId == user.id;
-    final canSendPaymentLink =
-        _normalizeWhatsappDigits(whatsappRaw) != null && !user.isBlocked;
+    final canSendPaymentLink = _normalizeWhatsappDigits(whatsappRaw) != null;
+    final accountChip = _memberAccountChip(user);
 
     return ListView(
       padding: const EdgeInsets.all(14),
@@ -2783,11 +2791,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
               ),
             ),
             Chip(
-              label: Text(user.isBlocked ? 'BLOCKED' : 'ACTIVE'),
-              avatar: Icon(
-                user.isBlocked ? Icons.lock : Icons.check_circle,
-                size: 18,
-              ),
+              label: Text(accountChip.label),
+              avatar: Icon(accountChip.icon, size: 18),
             ),
           ],
         ),
@@ -3041,7 +3046,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           setState(() => _toolCreateBlocked = value == true);
                         },
                         contentPadding: EdgeInsets.zero,
-                        title: const Text('Create as blocked'),
+                        title: const Text('Create as inactive'),
                       ),
                     ),
                   ],
@@ -3273,8 +3278,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   selectedUser == null
                       ? 'Select a user first.'
                       : (selectedUser.isBlocked
-                            ? 'User is currently BLOCKED. Running action will unblock.'
-                            : 'User is currently ACTIVE. Running action will block.'),
+                            ? 'User account is currently INACTIVE. Running action will attempt to activate.'
+                            : 'User account is currently ACTIVE. Running action will set inactive.'),
                 ),
                 const SizedBox(height: 8),
                 const Text(
