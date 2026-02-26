@@ -573,6 +573,7 @@ class AdminWaMessage {
   final DateTime? timestamp;
   final String? waMessageId;
   final String? deliveryStatus;
+  final AdminWaMessageMedia? media;
 
   const AdminWaMessage({
     required this.id,
@@ -583,12 +584,17 @@ class AdminWaMessage {
     this.timestamp,
     this.waMessageId,
     this.deliveryStatus,
+    this.media,
   });
 
   bool get isInbound => direction.trim().toLowerCase() == 'in';
   bool get isOutbound => direction.trim().toLowerCase() == 'out';
+  bool get hasMedia => media != null;
 
   factory AdminWaMessage.fromJson(Map<String, dynamic> j) {
+    final mediaRaw = j['media'];
+    final mediaMap = mediaRaw is Map ? mediaRaw.cast<String, dynamic>() : null;
+
     return AdminWaMessage(
       id: _parseInt(j['id']),
       conversationId: j['conversation_id'] == null
@@ -600,6 +606,43 @@ class AdminWaMessage {
       timestamp: _parseDate(j['timestamp']),
       waMessageId: _readString(j['wa_message_id'] ?? j['waMessageId']),
       deliveryStatus: _readString(j['delivery_status'] ?? j['deliveryStatus']),
+      media: mediaMap == null ? null : AdminWaMessageMedia.fromJson(mediaMap),
+    );
+  }
+}
+
+class AdminWaMessageMedia {
+  final String type;
+  final String id;
+  final String? mimeType;
+  final String? caption;
+  final String? filename;
+  final String? sha256;
+  final String? downloadPath;
+
+  const AdminWaMessageMedia({
+    required this.type,
+    required this.id,
+    this.mimeType,
+    this.caption,
+    this.filename,
+    this.sha256,
+    this.downloadPath,
+  });
+
+  bool get isImage =>
+      type.trim().toLowerCase() == 'image' ||
+      (mimeType ?? '').trim().toLowerCase().startsWith('image/');
+
+  factory AdminWaMessageMedia.fromJson(Map<String, dynamic> j) {
+    return AdminWaMessageMedia(
+      type: _readString(j['type']) ?? 'media',
+      id: _readString(j['id']) ?? '',
+      mimeType: _readString(j['mime_type'] ?? j['mimeType']),
+      caption: _readString(j['caption']),
+      filename: _readString(j['filename']),
+      sha256: _readString(j['sha256']),
+      downloadPath: _readString(j['download_path'] ?? j['downloadPath']),
     );
   }
 }
