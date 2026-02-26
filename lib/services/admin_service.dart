@@ -262,6 +262,49 @@ class AdminService {
     );
   }
 
+  Future<AdminUser> updateMemberLicenses({
+    required int userId,
+    required List<String> baseTypes,
+    required List<String> addons,
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId/licenses');
+    final payload = <String, dynamic>{
+      'base_types': baseTypes
+          .map((value) => value.trim().toLowerCase())
+          .where((value) => value.isNotEmpty)
+          .toSet()
+          .toList(),
+      'addons': addons
+          .map((value) => value.trim().toLowerCase())
+          .where((value) => value.isNotEmpty)
+          .toSet()
+          .toList(),
+    };
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map) {
+        final userRaw = body['user'];
+        if (userRaw is Map<String, dynamic>) {
+          return AdminUser.fromJson(userRaw);
+        }
+        if (userRaw is Map) {
+          return AdminUser.fromJson(userRaw.cast<String, dynamic>());
+        }
+      }
+      throw Exception('License update succeeded but user payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to update member licenses (${res.statusCode}).',
+    );
+  }
+
   Future<AdminCreateMemberResult> createMemberUser({
     required String username,
     required String email,

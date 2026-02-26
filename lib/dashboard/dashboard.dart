@@ -151,6 +151,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   int? _sendingPaymentEmailInvoiceId;
   int? _sendingWelcomeEmailInvoiceId;
   int? _sendingMemberPaymentLinkUserId;
+  int? _updatingMemberLicensesUserId;
 
   bool _callsLoading = false;
   String? _callsError;
@@ -733,6 +734,131 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
 
     return out;
+  }
+
+  List<String> _memberBaseTypes(AdminUser user) {
+    final out = <String>{};
+
+    for (final license in user.licenses) {
+      final key = license.licenseType.trim().toLowerCase();
+      if (key == 'home_hooligan_android' || key == 'home_hooligan_web') {
+        out.add(key);
+      }
+    }
+
+    if (out.isEmpty) {
+      if (user.appAndroid == true) out.add('home_hooligan_android');
+      if (user.appWeb == true) out.add('home_hooligan_web');
+    }
+
+    if (out.isEmpty) {
+      final raw = (user.appTypeRaw ?? '').trim().toLowerCase();
+      if (raw.contains('home_hooligan_web') || raw.contains('member_web')) {
+        out.add('home_hooligan_web');
+      }
+      if (raw.contains('home_hooligan_android') ||
+          raw.contains('member_android')) {
+        out.add('home_hooligan_android');
+      }
+    }
+
+    if (out.isEmpty) {
+      out.add('home_hooligan_android');
+    }
+
+    return out.toList();
+  }
+
+  Future<void> _manageMemberAddons(AdminUser user) async {
+    if (_updatingMemberLicensesUserId != null) return;
+
+    final baseTypes = _memberBaseTypes(user);
+    final selected = <String>{..._defaultCheckoutAddonsForUser(user)};
+
+    final result = await showDialog<List<String>>(
+      context: context,
+      builder: (dialogContext) {
+        return StatefulBuilder(
+          builder: (context, setDialogState) {
+            return AlertDialog(
+              title: const Text('Manage Add-ons'),
+              content: SizedBox(
+                width: 560,
+                child: SingleChildScrollView(
+                  child: Column(
+                    mainAxisSize: MainAxisSize.min,
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text('Member: ${user.username}'),
+                      const SizedBox(height: 6),
+                      Text(
+                        'Base preserved: ${baseTypes.join(' + ')}',
+                        style: Theme.of(context).textTheme.bodySmall,
+                      ),
+                      const SizedBox(height: 12),
+                      for (final entry in _checkoutAddonLabels.entries)
+                        CheckboxListTile(
+                          value: selected.contains(entry.key),
+                          onChanged: (value) {
+                            setDialogState(() {
+                              if (value == true) {
+                                selected.add(entry.key);
+                              } else {
+                                selected.remove(entry.key);
+                              }
+                            });
+                          },
+                          contentPadding: EdgeInsets.zero,
+                          title: Text(entry.value),
+                        ),
+                    ],
+                  ),
+                ),
+              ),
+              actions: [
+                TextButton(
+                  onPressed: () => Navigator.pop(dialogContext),
+                  child: const Text('Cancel'),
+                ),
+                FilledButton(
+                  onPressed: () {
+                    Navigator.pop(dialogContext, selected.toList());
+                  },
+                  child: const Text('Save'),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+
+    if (result == null) return;
+
+    setState(() => _updatingMemberLicensesUserId = user.id);
+    try {
+      final detail = await _service.updateMemberLicenses(
+        userId: user.id,
+        baseTypes: baseTypes,
+        addons: result,
+      );
+      if (!mounted) return;
+      setState(() {
+        _members = _members
+            .map((member) => member.id == detail.id ? detail : member)
+            .toList();
+        if (_memberDetail?.id == detail.id) {
+          _memberDetail = detail;
+        }
+      });
+      _toast('Member add-ons updated.');
+    } catch (e) {
+      _toast('Failed to update add-ons: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _updatingMemberLicensesUserId = null);
+      }
+    }
   }
 
   Future<void> _sendMemberPaymentLink(AdminUser user) async {
@@ -2843,7 +2969,33 @@ class _AdminDashboardState extends State<AdminDashboard> {
         ),
         const SizedBox(height: 14),
         const Divider(),
-        Text('Licenses', style: Theme.of(context).textTheme.titleMedium),
+        Row(
+          children: [
+            Expanded(
+              child: Text(
+                'Licenses',
+                style: Theme.of(context).textTheme.titleMedium,
+              ),
+            ),
+            OutlinedButton.icon(
+              onPressed: _updatingMemberLicensesUserId == user.id
+                  ? null
+                  : () => _manageMemberAddons(user),
+              icon: _updatingMemberLicensesUserId == user.id
+                  ? const SizedBox(
+                      width: 14,
+                      height: 14,
+                      child: CircularProgressIndicator(strokeWidth: 2),
+                    )
+                  : const Icon(Icons.tune),
+              label: Text(
+                _updatingMemberLicensesUserId == user.id
+                    ? 'Saving...'
+                    : 'Manage Add-ons',
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 6),
         if (user.licenses.isEmpty)
           const Text('No licenses found.')
