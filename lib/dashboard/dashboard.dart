@@ -148,6 +148,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
   final _invoiceDateCtrl = TextEditingController();
   String _invoiceMethodFilter = 'all';
   int? _activatingInvoiceId;
+  int? _reactivatingInvoiceId;
   int? _sendingPaymentEmailInvoiceId;
   int? _sendingWelcomeEmailInvoiceId;
   int? _sendingMemberPaymentLinkUserId;
@@ -2044,6 +2045,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  bool _canReactivateInvoice(AdminInvoice invoice) {
+    final status = invoice.status.trim().toLowerCase();
+    return status == 'expired' || status == 'failed' || status == 'cancelled';
+  }
+
   bool _canActivateEftInvoice(AdminInvoice invoice) {
     if (_invoiceMethodToken(invoice) != 'eft') return false;
 
@@ -2056,6 +2062,48 @@ class _AdminDashboardState extends State<AdminDashboard> {
   bool _canSendInvoiceEmails(AdminInvoice invoice) {
     final status = invoice.status.trim().toLowerCase();
     return status == 'paid' || status == 'completed';
+  }
+
+  Future<void> _reactivateInvoice(AdminInvoice invoice) async {
+    if (_reactivatingInvoiceId != null) return;
+
+    final confirm = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('Reactivate payment?'),
+        content: Text(
+          'Reactivate ${invoice.invoiceNumber} and extend the checkout expiry so the user can pay again.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.of(dialogContext).pop(true),
+            child: const Text('Reactivate'),
+          ),
+        ],
+      ),
+    );
+
+    if (confirm != true) return;
+
+    setState(() => _reactivatingInvoiceId = invoice.id);
+    try {
+      final updated = await _service.reactivateInvoice(checkoutId: invoice.id);
+      if (!mounted) return;
+      setState(() {
+        _invoices = _invoices
+            .map((row) => row.id == updated.id ? updated : row)
+            .toList();
+      });
+      _toast('Payment reactivated.');
+    } catch (e) {
+      _toast('Reactivate payment failed: $e');
+    } finally {
+      if (mounted) setState(() => _reactivatingInvoiceId = null);
+    }
   }
 
   Future<void> _activateEftInvoice(AdminInvoice invoice) async {
@@ -4664,6 +4712,14 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       ),
                       DropdownMenuItem(value: 'failed', child: Text('Failed')),
                       DropdownMenuItem(
+                        value: 'expired',
+                        child: Text('Expired'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'cancelled',
+                        child: Text('Cancelled'),
+                      ),
+                      DropdownMenuItem(
                         value: 'completed',
                         child: Text('Completed'),
                       ),
@@ -4773,9 +4829,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
                       itemBuilder: (_, i) {
                         final invoice = visibleInvoices[i];
                         final methodLabel = _invoiceMethodLabel(invoice);
+                        final canReactivate = _canReactivateInvoice(invoice);
                         final canActivateEft = _canActivateEftInvoice(invoice);
                         final canSendEmails = _canSendInvoiceEmails(invoice);
                         final activating = _activatingInvoiceId == invoice.id;
+                        final reactivating =
+                            _reactivatingInvoiceId == invoice.id;
                         final sendingPaymentEmail =
                             _sendingPaymentEmailInvoiceId == invoice.id;
                         final sendingWelcomeEmail =
@@ -4787,6 +4846,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
                         );
 
                         final actions = <Widget>[];
+                        if (canReactivate) {
+                          actions.add(
+                            TextButton(
+                              onPressed: reactivating
+                                  ? null
+                                  : () => _reactivateInvoice(invoice),
+                              child: reactivating
+                                  ? const SizedBox(
+                                      width: 14,
+                                      height: 14,
+                                      child: CircularProgressIndicator(
+                                        strokeWidth: 2,
+                                      ),
+                                    )
+                                  : const Text('Reactivate payment'),
+                            ),
+                          );
+                        }
                         if (canActivateEft) {
                           actions.add(
                             TextButton(
