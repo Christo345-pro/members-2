@@ -38,6 +38,7 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
   bool _loadingConversations = false;
   bool _loadingMessages = false;
   bool _sending = false;
+  final Set<int> _retryingMessageIds = <int>{};
 
   String? _conversationsError;
   String? _messagesError;
@@ -241,6 +242,51 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
       _toast('Send failed: $e');
     } finally {
       if (mounted) setState(() => _sending = false);
+    }
+  }
+
+  String _deliveryStatus(AdminWaMessage message) {
+    return (message.deliveryStatus ?? '').trim().toLowerCase();
+  }
+
+  bool _canRetryMessage(AdminWaMessage message) {
+    if (!message.isOutbound) return false;
+    if (_deliveryStatus(message) != 'failed') return false;
+    if (message.type.trim().toLowerCase() == 'status') return false;
+    if (message.hasMedia) return false;
+
+    return (message.body ?? '').trim().isNotEmpty;
+  }
+
+  Future<void> _retryMessage(AdminWaMessage message) async {
+    if (!_canRetryMessage(message)) return;
+    if (_sending || _retryingMessageIds.contains(message.id)) return;
+
+    final conversationId = message.conversationId ?? _selectedConversationId;
+    if (conversationId == null) {
+      _toast('Could not retry: conversation id missing.');
+      return;
+    }
+
+    final body = (message.body ?? '').trim();
+    if (body.isEmpty) {
+      _toast('Could not retry: original message body is empty.');
+      return;
+    }
+
+    setState(() => _retryingMessageIds.add(message.id));
+    try {
+      await _service.sendWaMessage(conversationId: conversationId, body: body);
+      _toast('Retry sent. Waiting for webhook status.');
+      await _loadMessages(silent: true);
+      await _loadConversations(silent: true);
+      _scrollToBottom();
+    } catch (e) {
+      _toast('Retry failed: $e');
+    } finally {
+      if (mounted) {
+        setState(() => _retryingMessageIds.remove(message.id));
+      }
     }
   }
 
@@ -675,6 +721,8 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
                   itemBuilder: (_, i) {
                     final message = _messages[i];
                     final inbound = message.isInbound;
+                    final canRetry = _canRetryMessage(message);
+                    final retrying = _retryingMessageIds.contains(message.id);
 
                     return Align(
                       alignment: inbound
@@ -707,6 +755,32 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
                                 '${message.deliveryStatus == null ? '' : ' • ${message.deliveryStatus}'}',
                                 style: Theme.of(context).textTheme.bodySmall,
                               ),
+                              if (canRetry) ...[
+                                const SizedBox(height: 6),
+                                TextButton.icon(
+                                  onPressed: retrying || _sending
+                                      ? null
+                                      : () => _retryMessage(message),
+                                  icon: retrying
+                                      ? const SizedBox(
+                                          width: 14,
+                                          height: 14,
+                                          child: CircularProgressIndicator(
+                                            strokeWidth: 2,
+                                          ),
+                                        )
+                                      : const Icon(Icons.refresh, size: 16),
+                                  label: Text(
+                                    retrying ? 'Retrying...' : 'Retry',
+                                  ),
+                                  style: TextButton.styleFrom(
+                                    padding: EdgeInsets.zero,
+                                    minimumSize: const Size(0, 30),
+                                    tapTargetSize:
+                                        MaterialTapTargetSize.shrinkWrap,
+                                  ),
+                                ),
+                              ],
                             ],
                           ),
                         ),
