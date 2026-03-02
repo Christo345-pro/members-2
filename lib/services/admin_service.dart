@@ -932,6 +932,30 @@ class AdminService {
     );
   }
 
+  Future<AdminInvoice> reactivateInvoice({required int checkoutId}) async {
+    final uri = Uri.parse(
+      '$_baseUrl/api/admin/invoices/$checkoutId/reactivate',
+    );
+
+    final res = await http
+        .post(uri, headers: _headers(jsonBody: true), body: '{}')
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final invoiceRaw = body is Map ? body['invoice'] : null;
+      if (invoiceRaw is Map) {
+        return AdminInvoice.fromJson(invoiceRaw.cast<String, dynamic>());
+      }
+      throw Exception('Reactivation succeeded but invoice payload is missing.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to reactivate checkout (${res.statusCode}).',
+    );
+  }
+
   Future<AdminInvoice> sendPaymentInvoiceEmail({
     required int checkoutId,
   }) async {
