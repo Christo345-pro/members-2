@@ -36,6 +36,7 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
   Timer? _threadPollTimer;
 
   bool _loadingConversations = false;
+  bool _loadingMoreConversations = false;
   bool _loadingMessages = false;
   bool _sending = false;
   final Set<int> _retryingMessageIds = <int>{};
@@ -45,9 +46,12 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
 
   List<AdminWaConversation> _conversations = [];
   List<AdminWaMessage> _messages = [];
+  bool _hasMoreConversations = false;
 
   int? _selectedConversationId;
   bool _mobileThreadOpen = false;
+  String? _draftWaUser;
+  String? _draftTitle;
 
   AdminWaConversation? get _selectedConversation {
     final id = _selectedConversationId;
@@ -58,6 +62,136 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
     }
 
     return null;
+  }
+
+  String? get _activeWaUser => _selectedConversation?.waUser ?? _draftWaUser;
+
+  String get _activeThreadTitle {
+    final conversation = _selectedConversation;
+    if (conversation != null) return conversation.title;
+    final draftTitle = (_draftTitle ?? '').trim();
+    if (draftTitle.isNotEmpty) return draftTitle;
+    final waUser = (_draftWaUser ?? '').trim();
+    if (waUser.isNotEmpty) return waUser;
+    return 'New conversation';
+  }
+
+  AdminWaConversation? _findConversationForWaUser(
+    Iterable<AdminWaConversation> rows,
+    String waUser,
+  ) {
+    final target = waUser.trim();
+    if (target.isEmpty) return null;
+
+    for (final row in rows) {
+      if (row.waUser.trim() == target) return row;
+      if ((row.userWhatsappPhone ?? '').trim() == target) return row;
+    }
+    return null;
+  }
+
+  List<AdminWaConversation> _mergeConversationLists(
+    List<AdminWaConversation> current,
+    List<AdminWaConversation> incoming,
+  ) {
+    final byId = <int, AdminWaConversation>{};
+    for (final row in current) {
+      byId[row.id] = row;
+    }
+    for (final row in incoming) {
+      byId[row.id] = row;
+    }
+
+    final merged = byId.values.toList();
+    merged.sort((a, b) {
+      final aLast = a.lastMessageAt;
+      final bLast = b.lastMessageAt;
+      if (aLast != null && bLast != null) {
+        final compare = bLast.compareTo(aLast);
+        if (compare != 0) return compare;
+      } else if (aLast == null && bLast != null) {
+        return 1;
+      } else if (aLast != null && bLast == null) {
+        return -1;
+      }
+
+      final aUpdated = a.updatedAt;
+      final bUpdated = b.updatedAt;
+      if (aUpdated != null && bUpdated != null) {
+        final compare = bUpdated.compareTo(aUpdated);
+        if (compare != 0) return compare;
+      } else if (aUpdated == null && bUpdated != null) {
+        return 1;
+      } else if (aUpdated != null && bUpdated == null) {
+        return -1;
+      }
+
+      return b.id.compareTo(a.id);
+    });
+
+    return merged;
+  }
+
+  Future<void> openComposerForWaUser({
+    required String waUser,
+    String? title,
+    String? draftMessage,
+  }) async {
+    final target = waUser.trim();
+    if (target.isEmpty) {
+      _toast('Invalid WhatsApp number.');
+      return;
+    }
+
+    final existing = _findConversationForWaUser(_conversations, target);
+    if (existing != null) {
+      setState(() {
+        _selectedConversationId = existing.id;
+        _draftWaUser = null;
+        _draftTitle = null;
+        _mobileThreadOpen = true;
+        _composerCtrl.text = (draftMessage ?? '').trim();
+      });
+      await _loadMessages(silent: false);
+      return;
+    }
+
+    try {
+      final page = await _service.fetchWaConversationsPage(
+        query: target,
+        limit: 60,
+      );
+      final found = _findConversationForWaUser(page.conversations, target);
+      if (!mounted) return;
+
+      setState(() {
+        _conversations = _mergeConversationLists(
+          _conversations,
+          page.conversations,
+        );
+        _hasMoreConversations = page.hasMore;
+        _conversationsError = null;
+        _mobileThreadOpen = true;
+        _composerCtrl.text = (draftMessage ?? '').trim();
+        if (found != null) {
+          _selectedConversationId = found.id;
+          _draftWaUser = null;
+          _draftTitle = null;
+        } else {
+          _selectedConversationId = null;
+          _messages = [];
+          _messagesError = null;
+          _draftWaUser = target;
+          _draftTitle = (title ?? '').trim().isEmpty ? target : title!.trim();
+        }
+      });
+
+      if (found != null) {
+        await _loadMessages(silent: false);
+      }
+    } catch (e) {
+      _toast('Open WhatsApp composer failed: $e');
+    }
   }
 
   @override
@@ -113,29 +247,62 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
   }
 
   Future<void> _loadConversations({required bool silent}) async {
-    if (_loadingConversations) return;
+    await _loadConversationsPage(silent: silent, append: false);
+  }
+
+  Future<void> _loadOlderConversations() async {
+    await _loadConversationsPage(silent: true, append: true);
+  }
+
+  Future<void> _loadConversationsPage({
+    required bool silent,
+    required bool append,
+  }) async {
+    if (append) {
+      if (_loadingMoreConversations || _loadingConversations) return;
+      if (_conversations.isEmpty || !_hasMoreConversations) return;
+    } else {
+      if (_loadingConversations) return;
+    }
 
     setState(() {
-      _loadingConversations = true;
+      if (append) {
+        _loadingMoreConversations = true;
+      } else {
+        _loadingConversations = true;
+      }
       if (!silent) _conversationsError = null;
     });
 
     try {
-      final rows = await _service.fetchWaConversations(
+      final cursor = append ? _conversations.last : null;
+      final page = await _service.fetchWaConversationsPage(
         query: _searchCtrl.text.trim(),
         limit: 300,
+        beforeLastMessageAt: append ? cursor?.lastMessageAt : null,
+        beforeUpdatedAt: append ? cursor?.updatedAt : null,
+        beforeId: append ? cursor?.id : null,
       );
+      final rows = page.conversations;
 
       final previousId = _selectedConversationId;
+      final draftWaUser = (_draftWaUser ?? '').trim();
+      final draftMatch = draftWaUser.isEmpty
+          ? null
+          : _findConversationForWaUser(rows, draftWaUser);
       int? nextId = previousId;
 
-      if (rows.isEmpty) {
+      if (!append && rows.isEmpty) {
         nextId = null;
-      } else if (nextId == null || !rows.any((c) => c.id == nextId)) {
-        nextId = rows.first.id;
+      } else if (!append && draftMatch != null) {
+        nextId = draftMatch.id;
+      } else if (!append &&
+          (nextId == null || !rows.any((c) => c.id == nextId))) {
+        nextId = draftWaUser.isEmpty ? rows.first.id : null;
       }
 
       final shouldReloadMessages =
+          !append &&
           nextId != null &&
           (nextId != previousId ||
               _messages.isEmpty ||
@@ -143,10 +310,17 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
 
       if (!mounted) return;
       setState(() {
-        _conversations = rows;
+        _conversations = append
+            ? _mergeConversationLists(_conversations, rows)
+            : rows;
         _selectedConversationId = nextId;
         _conversationsError = null;
-        if (nextId == null) {
+        _hasMoreConversations = page.hasMore;
+        if (draftMatch != null) {
+          _draftWaUser = null;
+          _draftTitle = null;
+        }
+        if (!append && nextId == null) {
           _messages = [];
           _messagesError = null;
         }
@@ -159,7 +333,15 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
       if (!mounted) return;
       setState(() => _conversationsError = e.toString());
     } finally {
-      if (mounted) setState(() => _loadingConversations = false);
+      if (mounted) {
+        setState(() {
+          if (append) {
+            _loadingMoreConversations = false;
+          } else {
+            _loadingConversations = false;
+          }
+        });
+      }
     }
   }
 
@@ -209,7 +391,8 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
     }
 
     final conversation = _selectedConversation;
-    if (conversation == null) {
+    final draftWaUser = (_draftWaUser ?? '').trim();
+    if (conversation == null && draftWaUser.isEmpty) {
       _toast('Select a conversation first.');
       return;
     }
@@ -226,14 +409,27 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
         );
       }
 
-      await _service.sendWaMessage(
-        conversationId: conversation.id,
+      final sendResult = await _service.sendWaMessage(
+        conversationId: conversation?.id,
+        waUser: conversation == null ? draftWaUser : null,
         body: text.isEmpty ? '[image]' : text,
         headerImageUrl: headerImageUrl,
       );
       _composerCtrl.clear();
       if (mounted) {
-        setState(() => _composerImage = null);
+        setState(() {
+          _composerImage = null;
+          final sentConversation = sendResult.conversation;
+          if (sentConversation != null) {
+            _selectedConversationId = sentConversation.id;
+            _draftWaUser = null;
+            _draftTitle = null;
+            _conversations = _mergeConversationLists([
+              sentConversation,
+              ..._conversations,
+            ], const []);
+          }
+        });
       }
       await _loadMessages(silent: true);
       await _loadConversations(silent: true);
@@ -486,6 +682,8 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
   void _selectConversation(AdminWaConversation conversation, bool mobileMode) {
     setState(() {
       _selectedConversationId = conversation.id;
+      _draftWaUser = null;
+      _draftTitle = null;
       if (mobileMode) _mobileThreadOpen = true;
     });
     _loadMessages(silent: false);
@@ -568,89 +766,113 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
               ? Center(child: Text('Error: $_conversationsError'))
               : _conversations.isEmpty
               ? const Center(child: Text('No WhatsApp conversations yet.'))
-              : ListView.separated(
-                  itemCount: _conversations.length,
-                  separatorBuilder: (_, index) => const Divider(height: 1),
-                  itemBuilder: (_, i) {
-                    final row = _conversations[i];
-                    final selected = row.id == _selectedConversationId;
-                    final preview =
-                        (row.lastMessagePreview ?? 'No messages yet').trim();
+              : Column(
+                  children: [
+                    Expanded(
+                      child: ListView.separated(
+                        itemCount: _conversations.length,
+                        separatorBuilder: (_, index) =>
+                            const Divider(height: 1),
+                        itemBuilder: (_, i) {
+                          final row = _conversations[i];
+                          final selected = row.id == _selectedConversationId;
+                          final preview =
+                              (row.lastMessagePreview ?? 'No messages yet')
+                                  .trim();
 
-                    return Material(
-                      color: selected
-                          ? Theme.of(
-                              context,
-                            ).colorScheme.primary.withValues(alpha: 0.10)
-                          : Colors.transparent,
-                      child: InkWell(
-                        onTap: () => _selectConversation(row, mobileMode),
-                        child: Padding(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 12,
-                            vertical: 10,
-                          ),
-                          child: Row(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Expanded(
-                                child: Column(
+                          return Material(
+                            color: selected
+                                ? Theme.of(
+                                    context,
+                                  ).colorScheme.primary.withValues(alpha: 0.10)
+                                : Colors.transparent,
+                            child: InkWell(
+                              onTap: () => _selectConversation(row, mobileMode),
+                              child: Padding(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 12,
+                                  vertical: 10,
+                                ),
+                                child: Row(
                                   crossAxisAlignment: CrossAxisAlignment.start,
                                   children: [
-                                    Text(
-                                      row.title,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
+                                    Expanded(
+                                      child: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                            row.title,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            row.waUser,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodyMedium,
+                                          ),
+                                          const SizedBox(height: 2),
+                                          Text(
+                                            preview,
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodyMedium,
+                                          ),
+                                        ],
+                                      ),
                                     ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      row.waUser,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodyMedium,
-                                    ),
-                                    const SizedBox(height: 2),
-                                    Text(
-                                      preview,
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodyMedium,
+                                    const SizedBox(width: 10),
+                                    SizedBox(
+                                      width: 110,
+                                      child: Column(
+                                        mainAxisSize: MainAxisSize.min,
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.end,
+                                        children: [
+                                          Text(
+                                            _fmtDate(row.lastMessageAt),
+                                            maxLines: 1,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: Theme.of(
+                                              context,
+                                            ).textTheme.bodySmall,
+                                          ),
+                                          const SizedBox(height: 6),
+                                          _buildWindowStatusBadge(
+                                            row.within24HourWindow,
+                                          ),
+                                        ],
+                                      ),
                                     ),
                                   ],
                                 ),
                               ),
-                              const SizedBox(width: 10),
-                              SizedBox(
-                                width: 110,
-                                child: Column(
-                                  mainAxisSize: MainAxisSize.min,
-                                  crossAxisAlignment: CrossAxisAlignment.end,
-                                  children: [
-                                    Text(
-                                      _fmtDate(row.lastMessageAt),
-                                      maxLines: 1,
-                                      overflow: TextOverflow.ellipsis,
-                                      style: Theme.of(
-                                        context,
-                                      ).textTheme.bodySmall,
-                                    ),
-                                    const SizedBox(height: 6),
-                                    _buildWindowStatusBadge(
-                                      row.within24HourWindow,
-                                    ),
-                                  ],
-                                ),
-                              ),
-                            ],
+                            ),
+                          );
+                        },
+                      ),
+                    ),
+                    if (_hasMoreConversations || _loadingMoreConversations)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(12, 8, 12, 12),
+                        child: OutlinedButton(
+                          onPressed: _loadingMoreConversations
+                              ? null
+                              : _loadOlderConversations,
+                          child: Text(
+                            _loadingMoreConversations
+                                ? 'Loading...'
+                                : 'View More',
                           ),
                         ),
                       ),
-                    );
-                  },
+                  ],
                 ),
         ),
       ],
@@ -659,7 +881,8 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
 
   Widget _buildThreadPane({required bool showBackButton}) {
     final conversation = _selectedConversation;
-    if (conversation == null) {
+    final activeWaUser = _activeWaUser;
+    if (conversation == null && (activeWaUser ?? '').trim().isEmpty) {
       return const Center(child: Text('Select a conversation to view thread.'));
     }
 
@@ -682,21 +905,22 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      conversation.title,
+                      _activeThreadTitle,
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 2),
                     Text(
-                      conversation.waUser,
+                      activeWaUser ?? '—',
                       style: Theme.of(context).textTheme.bodySmall,
                     ),
                   ],
                 ),
               ),
-              _buildWindowStatusBadge(conversation.within24HourWindow),
+              if (conversation != null)
+                _buildWindowStatusBadge(conversation.within24HourWindow),
               IconButton(
                 tooltip: 'Refresh thread',
-                onPressed: _loadingMessages
+                onPressed: conversation == null || _loadingMessages
                     ? null
                     : () => _loadMessages(silent: false),
                 icon: const Icon(Icons.refresh),
@@ -711,8 +935,12 @@ class WhatsAppMessagesPanelState extends State<WhatsAppMessagesPanel> {
               : _messagesError != null && _messages.isEmpty
               ? Center(child: Text('Error: $_messagesError'))
               : _messages.isEmpty
-              ? const Center(
-                  child: Text('No messages in this conversation yet.'),
+              ? Center(
+                  child: Text(
+                    conversation == null
+                        ? 'No conversation history yet. Send the first message to create it.'
+                        : 'No messages in this conversation yet.',
+                  ),
                 )
               : ListView.builder(
                   controller: _scrollCtrl,

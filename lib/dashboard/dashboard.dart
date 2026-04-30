@@ -9,6 +9,10 @@ import '../models/admin_models.dart';
 import '../platform/platform_features.dart';
 import '../screens/whatsapp_messages_panel.dart';
 import '../services/admin_service.dart';
+import '../services/report_file_exporter_stub.dart'
+    if (dart.library.html) '../services/report_file_exporter_web.dart'
+    if (dart.library.io) '../services/report_file_exporter_io.dart'
+    as report_file_exporter;
 import '../services/local_member_db_stub.dart'
     if (dart.library.io) '../services/local_member_db.dart';
 
@@ -18,6 +22,28 @@ class _MemberStatusChipConfig {
 
   const _MemberStatusChipConfig({required this.label, required this.icon});
 }
+
+class _PaymentGapReportRow {
+  final String groupLabel;
+  final AdminUser user;
+  final AdminInvoice? lastSuccessfulInvoice;
+  final DateTime? lastPaymentAt;
+  final int? daysSincePayment;
+
+  const _PaymentGapReportRow({
+    required this.groupLabel,
+    required this.user,
+    this.lastSuccessfulInvoice,
+    this.lastPaymentAt,
+    this.daysSincePayment,
+  });
+}
+
+const List<String> _paymentSummaryGroupOrder = [
+  'No successful payment',
+  'Payments in the past month',
+  'Payments older than a month',
+];
 
 class AdminDashboard extends StatefulWidget {
   const AdminDashboard({super.key});
@@ -29,6 +55,8 @@ class AdminDashboard extends StatefulWidget {
 class _AdminDashboardState extends State<AdminDashboard> {
   final _service = AdminService();
   final _waInboxKey = GlobalKey<WhatsAppMessagesPanelState>();
+  final _invoiceHorizontalScrollCtrl = ScrollController();
+  final _invoiceVerticalScrollCtrl = ScrollController();
   Timer? _waIncomingPollTimer;
   bool _waIncomingPolling = false;
   bool _waIncomingInitialized = false;
@@ -85,17 +113,19 @@ class _AdminDashboardState extends State<AdminDashboard> {
   List<AdminUser> _members = [];
   int? _selectedMemberId;
   AdminUser? _memberDetail;
+  bool _reportLoading = false;
+  String? _reportError;
+  List<_PaymentGapReportRow> _paymentGapReportRows = [];
+  DateTime? _paymentGapReportCutoff;
+  DateTime? _paymentGapReportGeneratedAt;
+  final Set<int> _selectedPaymentReportUserIds = <int>{};
+  String _paymentSummarySortBy = 'client_code';
 
   final _memberSearchCtrl = TextEditingController();
-  final _memberNameCtrl = TextEditingController();
-  final _memberAccountCtrl = TextEditingController();
-  final _memberEmailCtrl = TextEditingController();
-  final _memberDateCtrl = TextEditingController();
-  String _memberPlanFilter = 'all';
 
   bool _toolsBusy = false;
   int? _toolsUserId;
-  String _toolsAction = 'Create user';
+  String? _toolsAction;
   final _toolCreateUsernameCtrl = TextEditingController();
   final _toolCreateEmailCtrl = TextEditingController();
   final _toolCreateNameCtrl = TextEditingController();
@@ -142,15 +172,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
   bool _invoicesLoading = false;
   String? _invoicesError;
   List<AdminInvoice> _invoices = [];
-  String _invoiceStatus = 'all';
   bool _invoiceSelectedMemberOnly = false;
   final _invoiceSearchCtrl = TextEditingController();
-  final _invoiceDateCtrl = TextEditingController();
-  String _invoiceMethodFilter = 'all';
-  int? _activatingInvoiceId;
-  int? _reactivatingInvoiceId;
-  int? _sendingPaymentEmailInvoiceId;
-  int? _sendingWelcomeEmailInvoiceId;
+  String _invoiceSortBy = 'date';
+  String _invoiceSortDirection = 'descending';
   int? _sendingMemberPaymentLinkUserId;
   int? _updatingMemberLicensesUserId;
 
@@ -193,10 +218,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
   void dispose() {
     _stopWhatsAppIncomingPolling();
     _memberSearchCtrl.dispose();
-    _memberNameCtrl.dispose();
-    _memberAccountCtrl.dispose();
-    _memberEmailCtrl.dispose();
-    _memberDateCtrl.dispose();
     _toolCreateUsernameCtrl.dispose();
     _toolCreateEmailCtrl.dispose();
     _toolCreateNameCtrl.dispose();
@@ -216,7 +237,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _inviteEmailCtrl.dispose();
     _inviteWhatsappCtrl.dispose();
     _invoiceSearchCtrl.dispose();
-    _invoiceDateCtrl.dispose();
+    _invoiceHorizontalScrollCtrl.dispose();
+    _invoiceVerticalScrollCtrl.dispose();
     _statsSearchCtrl.dispose();
     _statsDateCtrl.dispose();
     _callsSearchCtrl.dispose();
@@ -379,7 +401,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _waIncomingDialogOpen = false;
 
     if (openInbox == true && mounted) {
-      setState(() => _tab = 7);
+      setState(() => _tab = 6);
       await _waInboxKey.currentState?.refreshAll();
     }
 
@@ -402,11 +424,56 @@ class _AdminDashboardState extends State<AdminDashboard> {
     return dt.toLocal().toString().split('.').first;
   }
 
-  bool _containsText(String? value, String needle) {
-    final hay = (value ?? '').toLowerCase();
-    final token = needle.trim().toLowerCase();
-    if (token.isEmpty) return true;
-    return hay.contains(token);
+  String _memberSortKey(AdminUser user) {
+    final accountNumber = (user.accountNumber ?? '').trim().toUpperCase();
+    if (accountNumber.isNotEmpty) return accountNumber;
+    return user.username.trim().toUpperCase();
+  }
+
+  String _memberSearchHaystack(AdminUser user) {
+    final fullName = '${user.name ?? ''} ${user.surname ?? ''}'.trim();
+    final createdAt = user.createdAt == null ? '' : _fmtDate(user.createdAt);
+
+    return [
+      user.username,
+      fullName,
+      user.email,
+      user.accountNumber ?? '',
+      user.whatsapp ?? '',
+      user.phone ?? '',
+      user.cellphone ?? '',
+      user.plan ?? '',
+      user.deviceType ?? '',
+      user.appTypeRaw ?? '',
+      user.city ?? '',
+      user.province ?? '',
+      user.postalCode ?? '',
+      createdAt,
+    ].join(' ').toLowerCase();
+  }
+
+  String _memberDisplayName(AdminUser user) {
+    final fullName = '${user.name ?? ''} ${user.surname ?? ''}'.trim();
+    return fullName.isEmpty ? user.username : fullName;
+  }
+
+  DateTime _paymentGapCutoffDate(DateTime reference) {
+    final year = reference.month == 1 ? reference.year - 1 : reference.year;
+    final month = reference.month == 1 ? 12 : reference.month - 1;
+    final lastDayOfTargetMonth = DateTime(year, month + 1, 0).day;
+    final day = reference.day > lastDayOfTargetMonth
+        ? lastDayOfTargetMonth
+        : reference.day;
+    return DateTime(
+      year,
+      month,
+      day,
+      reference.hour,
+      reference.minute,
+      reference.second,
+      reference.millisecond,
+      reference.microsecond,
+    );
   }
 
   bool _dateMatches(DateTime? dt, String token) {
@@ -462,26 +529,23 @@ class _AdminDashboardState extends State<AdminDashboard> {
         await _loadMembers();
         break;
       case 1:
-        await _loadMembers();
         break;
       case 2:
-        break;
-      case 3:
         await _loadAds();
         break;
-      case 4:
+      case 3:
         await _loadInvites();
         break;
-      case 5:
+      case 4:
         await _loadInvoices();
         break;
-      case 6:
+      case 5:
         await _loadStats();
         break;
-      case 7:
+      case 6:
         await _waInboxKey.currentState?.refreshAll();
         break;
-      case 8:
+      case 7:
         await _loadWhatsAppCalls();
         break;
     }
@@ -489,7 +553,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   Future<void> _openWhatsAppInboxTab() async {
     if (!mounted) return;
-    setState(() => _tab = 7);
+    setState(() => _tab = 6);
     await _waInboxKey.currentState?.refreshAll();
   }
 
@@ -502,10 +566,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     });
 
     try {
-      final list = await _service.fetchMembers(
-        query: _memberSearchCtrl.text.trim(),
-        limit: 300,
-      );
+      final list = await _service.fetchMembers(limit: 300);
 
       _members = list;
       await _syncMembersToLocalDb(list);
@@ -520,21 +581,24 @@ class _AdminDashboardState extends State<AdminDashboard> {
         return;
       }
 
-      _selectedMemberId ??= _members.first.id;
-      if (!_members.any((u) => u.id == _selectedMemberId)) {
-        _selectedMemberId = _members.first.id;
+      if (_selectedMemberId != null &&
+          !_members.any((u) => u.id == _selectedMemberId)) {
+        _selectedMemberId = null;
       }
-      _toolsUserId ??= _selectedMemberId;
-      if (!_members.any((u) => u.id == _toolsUserId)) {
-        _toolsUserId = _selectedMemberId;
+      if (_toolsUserId != null && !_members.any((u) => u.id == _toolsUserId)) {
+        _toolsUserId = null;
       }
 
-      final detail = await _service.fetchMemberDetail(_selectedMemberId!);
-      if (!mounted) return;
-
-      setState(() {
-        _memberDetail = detail;
-      });
+      if (_selectedMemberId == null) {
+        if (!mounted) return;
+        setState(() => _memberDetail = null);
+      } else {
+        final detail = await _service.fetchMemberDetail(_selectedMemberId!);
+        if (!mounted) return;
+        setState(() {
+          _memberDetail = detail;
+        });
+      }
     } catch (e) {
       if (!mounted) return;
       setState(() => _membersError = e.toString());
@@ -611,7 +675,12 @@ class _AdminDashboardState extends State<AdminDashboard> {
     try {
       final detail = await _service.fetchMemberDetail(user.id);
       if (!mounted) return;
-      setState(() => _memberDetail = detail);
+      setState(() {
+        _memberDetail = detail;
+        if (_toolsAction == 'Edit user' && _toolsUserId == detail.id) {
+          _populateToolsFormFromUser(detail);
+        }
+      });
     } catch (e) {
       _toast('Load member failed: $e');
     } finally {
@@ -656,6 +725,79 @@ class _AdminDashboardState extends State<AdminDashboard> {
     _toolCreateCheckoutAddons.clear();
     _toolCreateCheckoutAddonPlatforms.clear();
     _toolCreateBillingPreference = 'subscription';
+  }
+
+  void _populateToolsFormFromUser(AdminUser user) {
+    _toolCreateUsernameCtrl.text = user.username;
+    _toolCreateEmailCtrl.text = user.email;
+    _toolCreateNameCtrl.text = (user.name ?? '').trim();
+    _toolCreateSurnameCtrl.text = (user.surname ?? '').trim();
+    _toolCreatePhoneCtrl.text = (user.phone ?? '').trim();
+    _toolCreateWhatsAppCtrl.text = (user.whatsapp ?? '').trim();
+    _toolCreatePlanCtrl.text = (user.plan ?? 'free').trim().isEmpty
+        ? 'free'
+        : (user.plan ?? 'free').trim();
+    _toolCreateAndroid = user.appAndroid == true;
+    _toolCreateWindows = user.appWindows == true;
+    _toolCreateWeb = user.appWeb == true;
+    _toolCreateBlocked = user.isBlocked;
+    _toolCreateBillingPreference =
+        (user.billingPreference ?? '').trim() == 'invoice_monthly'
+        ? 'invoice_monthly'
+        : 'subscription';
+    _toolCreateSendPaymentLink = false;
+    _toolCreateCheckoutAndroid = false;
+    _toolCreateCheckoutWeb = false;
+    _toolCreateCheckoutAddons.clear();
+    _toolCreateCheckoutAddonPlatforms.clear();
+  }
+
+  Future<void> _loadToolsEditUser(int userId) async {
+    try {
+      final detail = await _service.fetchMemberDetail(userId);
+      if (!mounted) return;
+      if (_toolsAction != 'Edit user' || _toolsUserId != userId) return;
+      setState(() {
+        _populateToolsFormFromUser(detail);
+        _members = _members
+            .map((member) => member.id == detail.id ? detail : member)
+            .toList();
+        if (_memberDetail?.id == detail.id) {
+          _memberDetail = detail;
+        }
+      });
+    } catch (e) {
+      if (!mounted) return;
+      _toast('Load member details failed: $e');
+    }
+  }
+
+  Future<void> _onToolsActionChanged(String? value) async {
+    if (value == null) return;
+
+    final selectedMemberId = _selectedMemberId;
+    setState(() {
+      _toolsAction = value;
+      _toolPasswordCtrl.clear();
+      _toolPasswordConfirmCtrl.clear();
+      if (value == 'Create user') {
+        _toolsUserId = null;
+        _resetCreateUserToolForm();
+      } else if (selectedMemberId != null) {
+        _toolsUserId = selectedMemberId;
+      } else {
+        _toolsUserId = null;
+      }
+    });
+
+    if (value == 'Edit user' && _toolsUserId != null) {
+      final currentDetail = _memberDetail;
+      if (currentDetail != null && currentDetail.id == _toolsUserId) {
+        setState(() => _populateToolsFormFromUser(currentDetail));
+      } else {
+        await _loadToolsEditUser(_toolsUserId!);
+      }
+    }
   }
 
   bool _isPlatformSelectableAddon(String addonType) {
@@ -810,6 +952,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             });
                           },
                           contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
                           title: Text(entry.value),
                         ),
                     ],
@@ -908,6 +1051,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           setDialogState(() => includeAndroid = value == true);
                         },
                         contentPadding: EdgeInsets.zero,
+                        controlAffinity: ListTileControlAffinity.leading,
                         title: const Text('Android base'),
                       ),
                       CheckboxListTile(
@@ -916,6 +1060,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                           setDialogState(() => includeWeb = value == true);
                         },
                         contentPadding: EdgeInsets.zero,
+                        controlAffinity: ListTileControlAffinity.leading,
                         title: const Text('Web base'),
                       ),
                       const SizedBox(height: 8),
@@ -964,6 +1109,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                             });
                           },
                           contentPadding: EdgeInsets.zero,
+                          controlAffinity: ListTileControlAffinity.leading,
                           title: Text(entry.value),
                         ),
                         if (selectedAddons.contains(entry.key) &&
@@ -1133,7 +1279,13 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
     setState(() => _toolsBusy = true);
     try {
-      if (_toolsAction == 'Create user') {
+      final action = _toolsAction;
+      if (action == null) {
+        _toast('Select an action first.');
+        return;
+      }
+
+      if (action == 'Create user') {
         final username = _toolCreateUsernameCtrl.text.trim();
         final email = _toolCreateEmailCtrl.text.trim().toLowerCase();
         final name = _toolCreateNameCtrl.text.trim();
@@ -1234,21 +1386,80 @@ class _AdminDashboardState extends State<AdminDashboard> {
           await _loadInvoices();
           await _openWhatsAppInboxTab();
         }
+        final createdDetail = await _service.fetchMemberDetail(created.id);
         if (!mounted) return;
         setState(() {
           _selectedMemberId = created.id;
-          _toolsUserId = created.id;
+          _toolsUserId = null;
+          _memberDetail = createdDetail;
+          _members = _members
+              .map(
+                (member) =>
+                    member.id == createdDetail.id ? createdDetail : member,
+              )
+              .toList();
         });
         return;
       }
 
       final targetId = _toolsUserId ?? _selectedMemberId;
       if (targetId == null) {
-        _toast('Select a user first.');
+        _toast('Select a member first.');
         return;
       }
 
-      if (_toolsAction == 'Set password') {
+      if (action == 'Edit user') {
+        final username = _toolCreateUsernameCtrl.text.trim();
+        final email = _toolCreateEmailCtrl.text.trim().toLowerCase();
+        final name = _toolCreateNameCtrl.text.trim();
+
+        if (username.isEmpty || email.isEmpty || name.isEmpty) {
+          _toast('Username, email and name are required.');
+          return;
+        }
+
+        final updated = await _service.updateMemberUser(
+          userId: targetId,
+          username: username,
+          email: email,
+          name: name,
+          surname: _toolCreateSurnameCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreateSurnameCtrl.text.trim(),
+          phone: _toolCreatePhoneCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreatePhoneCtrl.text.trim(),
+          whatsapp: _toolCreateWhatsAppCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreateWhatsAppCtrl.text.trim(),
+          plan: _toolCreatePlanCtrl.text.trim().isEmpty
+              ? null
+              : _toolCreatePlanCtrl.text.trim(),
+          appAndroid: _toolCreateAndroid,
+          appWindows: _toolCreateWindows,
+          appWeb: _toolCreateWeb,
+          isBlocked: _toolCreateBlocked,
+          billingPreference: _toolCreateBillingPreference,
+        );
+
+        _toast('Member details updated.');
+        await _loadMembers();
+        if (!mounted) return;
+        setState(() {
+          _selectedMemberId = updated.id;
+          _toolsUserId = updated.id;
+          _members = _members
+              .map((member) => member.id == updated.id ? updated : member)
+              .toList();
+          if (_memberDetail?.id == updated.id) {
+            _memberDetail = updated;
+          }
+          _populateToolsFormFromUser(updated);
+        });
+        return;
+      }
+
+      if (action == 'Set password') {
         final password = _toolPasswordCtrl.text;
         final confirm = _toolPasswordConfirmCtrl.text;
         if (password.trim().length < 8) {
@@ -1270,7 +1481,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         return;
       }
 
-      if (_toolsAction == 'Toggle block') {
+      if (action == 'Toggle block') {
         final blocked = await _service.toggleMemberBlock(targetId);
         _toast(blocked ? 'User inactive.' : 'User active.');
         await _loadMembers();
@@ -1282,7 +1493,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
         return;
       }
 
-      _toast('Unknown tools action: $_toolsAction');
+      _toast('Unknown tools action: $action');
     } catch (e) {
       _toast('Tools action failed: $e');
     } finally {
@@ -1983,6 +2194,288 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  DateTime? _invoiceSuccessDate(AdminInvoice invoice) =>
+      invoice.completedAt ?? invoice.paidAt ?? invoice.createdAt;
+
+  bool _invoiceIsSuccessful(AdminInvoice invoice) {
+    final status = invoice.status.trim().toLowerCase();
+    return status == 'completed' || status == 'paid';
+  }
+
+  Future<void> _loadPaymentGapReport() async {
+    if (_reportLoading) return;
+
+    setState(() {
+      _reportLoading = true;
+      _reportError = null;
+    });
+
+    try {
+      final baseMembers = _members.isNotEmpty
+          ? List<AdminUser>.from(_members)
+          : await _service.fetchMembers(limit: 300);
+      final invoices = await _service.fetchInvoices(status: 'all', limit: 500);
+
+      final detailedMembers = <AdminUser>[];
+      for (final member in baseMembers) {
+        try {
+          final detail = await _service.fetchMemberDetail(member.id);
+          detailedMembers.add(detail);
+        } catch (_) {
+          detailedMembers.add(member);
+        }
+      }
+
+      final latestSuccessfulInvoiceByUser = <int, AdminInvoice>{};
+      for (final invoice in invoices) {
+        if (!_invoiceIsSuccessful(invoice)) continue;
+        final invoiceDate = _invoiceSuccessDate(invoice);
+        if (invoiceDate == null) continue;
+
+        final existing = latestSuccessfulInvoiceByUser[invoice.userId];
+        final existingDate = existing == null
+            ? null
+            : _invoiceSuccessDate(existing);
+        if (existing == null ||
+            existingDate == null ||
+            invoiceDate.isAfter(existingDate)) {
+          latestSuccessfulInvoiceByUser[invoice.userId] = invoice;
+        }
+      }
+
+      final generatedAt = DateTime.now();
+      final cutoff = _paymentGapCutoffDate(generatedAt);
+      final rows = <_PaymentGapReportRow>[];
+
+      for (final user in detailedMembers) {
+        final lastInvoice = latestSuccessfulInvoiceByUser[user.id];
+        final lastPaymentAt = lastInvoice == null
+            ? null
+            : _invoiceSuccessDate(lastInvoice);
+
+        if (lastPaymentAt == null) {
+          rows.add(
+            _PaymentGapReportRow(
+              groupLabel: 'No successful payment',
+              user: user,
+            ),
+          );
+          continue;
+        }
+
+        final isOlderThanMonth = lastPaymentAt.isBefore(cutoff);
+        rows.add(
+          _PaymentGapReportRow(
+            groupLabel: isOlderThanMonth
+                ? 'Payments older than a month'
+                : 'Payments in the past month',
+            user: user,
+            lastSuccessfulInvoice: lastInvoice,
+            lastPaymentAt: lastPaymentAt,
+            daysSincePayment: generatedAt.difference(lastPaymentAt).inDays,
+          ),
+        );
+      }
+
+      rows.sort((a, b) {
+        final groupCompare = _paymentSummaryGroupOrder
+            .indexOf(a.groupLabel)
+            .compareTo(_paymentSummaryGroupOrder.indexOf(b.groupLabel));
+        if (groupCompare != 0) return groupCompare;
+        return _memberSortKey(a.user).compareTo(_memberSortKey(b.user));
+      });
+
+      if (!mounted) return;
+      final previousSelectedIds = Set<int>.from(_selectedPaymentReportUserIds);
+      setState(() {
+        _paymentGapReportRows = rows;
+        _paymentGapReportCutoff = cutoff;
+        _paymentGapReportGeneratedAt = generatedAt;
+        _selectedPaymentReportUserIds
+          ..clear()
+          ..addAll(
+            rows.map((row) => row.user.id).where(previousSelectedIds.contains),
+          );
+        _members = baseMembers;
+      });
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _reportError = e.toString());
+    } finally {
+      if (mounted) setState(() => _reportLoading = false);
+    }
+  }
+
+  String _paymentGapStatusLabel(AdminUser user) =>
+      user.isBlocked ? 'INACTIVE' : 'ACTIVE';
+
+  String _paymentGapAmountLabel(_PaymentGapReportRow row) {
+    final amount = row.lastSuccessfulInvoice?.totalAmount;
+    if (amount == null) return '—';
+    return 'R${amount.toStringAsFixed(2)}';
+  }
+
+  String _paymentGapMethodLabel(_PaymentGapReportRow row) {
+    final invoice = row.lastSuccessfulInvoice;
+    if (invoice == null) return '—';
+    return _invoiceMethodLabel(invoice);
+  }
+
+  List<_PaymentGapReportRow> _paymentSummaryRows() {
+    final rows = _paymentGapReportRows.toList();
+    rows.sort((a, b) {
+      int compare;
+      switch (_paymentSummarySortBy) {
+        case 'member':
+          compare = _memberDisplayName(
+            a.user,
+          ).toLowerCase().compareTo(_memberDisplayName(b.user).toLowerCase());
+          break;
+        case 'email':
+          compare = a.user.email.trim().toLowerCase().compareTo(
+            b.user.email.trim().toLowerCase(),
+          );
+          break;
+        case 'status':
+          compare = _paymentGapStatusLabel(
+            a.user,
+          ).compareTo(_paymentGapStatusLabel(b.user));
+          break;
+        case 'last_payment':
+          final aDate = a.lastPaymentAt;
+          final bDate = b.lastPaymentAt;
+          if (aDate == null && bDate == null) {
+            compare = 0;
+          } else if (aDate == null) {
+            compare = -1;
+          } else if (bDate == null) {
+            compare = 1;
+          } else {
+            compare = aDate.compareTo(bDate);
+          }
+          break;
+        case 'days_ago':
+          compare = (a.daysSincePayment ?? -1).compareTo(
+            b.daysSincePayment ?? -1,
+          );
+          break;
+        case 'amount':
+          compare = (a.lastSuccessfulInvoice?.totalAmount ?? -1).compareTo(
+            b.lastSuccessfulInvoice?.totalAmount ?? -1,
+          );
+          break;
+        case 'payment_method':
+          compare = _paymentGapMethodLabel(
+            a,
+          ).toLowerCase().compareTo(_paymentGapMethodLabel(b).toLowerCase());
+          break;
+        case 'client_code':
+        default:
+          compare = _memberSortKey(a.user).compareTo(_memberSortKey(b.user));
+          break;
+      }
+
+      if (compare != 0) return compare;
+      return _memberSortKey(a.user).compareTo(_memberSortKey(b.user));
+    });
+    return rows;
+  }
+
+  int _paymentSummaryCount(String groupLabel) =>
+      _paymentGapReportRows.where((row) => row.groupLabel == groupLabel).length;
+
+  bool _isPaymentSummaryRowSelected(_PaymentGapReportRow row) =>
+      _selectedPaymentReportUserIds.contains(row.user.id);
+
+  void _togglePaymentSummaryRowSelection(
+    _PaymentGapReportRow row,
+    bool selected,
+  ) {
+    setState(() {
+      if (selected) {
+        _selectedPaymentReportUserIds.add(row.user.id);
+      } else {
+        _selectedPaymentReportUserIds.remove(row.user.id);
+      }
+    });
+  }
+
+  void _toggleAllPaymentSummaryRows(
+    List<_PaymentGapReportRow> rows,
+    bool selected,
+  ) {
+    setState(() {
+      if (selected) {
+        _selectedPaymentReportUserIds.addAll(rows.map((row) => row.user.id));
+      } else {
+        _selectedPaymentReportUserIds.removeAll(rows.map((row) => row.user.id));
+      }
+    });
+  }
+
+  Future<void> _exportSelectedPaymentSummaryRows() async {
+    final selectedRows = _paymentSummaryRows()
+        .where((row) => _selectedPaymentReportUserIds.contains(row.user.id))
+        .toList();
+    if (selectedRows.isEmpty) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Select at least one member first.')),
+      );
+      return;
+    }
+
+    final fileName =
+        'payment_summary_report_selected_'
+        '${DateTime.now().toLocal().toIso8601String().split('T').first}.xls';
+
+    final rows = <List<String>>[
+      const [
+        'Client code',
+        'Member',
+        'Email',
+        'Status',
+        'Amount',
+        'Payment method',
+        'Last payment',
+        'Days ago',
+      ],
+      ...selectedRows.map((row) {
+        final user = row.user;
+        return [
+          user.accountNumber ?? '—',
+          _memberDisplayName(user),
+          user.email.trim().isEmpty ? '—' : user.email.trim(),
+          _paymentGapStatusLabel(user),
+          _paymentGapAmountLabel(row),
+          _paymentGapMethodLabel(row),
+          _fmtDate(row.lastPaymentAt),
+          row.daysSincePayment?.toString() ?? '—',
+        ];
+      }),
+    ];
+
+    try {
+      final savedPath = await report_file_exporter.exportTableAsExcel(
+        fileName: fileName,
+        worksheetName: 'Payment Summary Report',
+        rows: rows,
+      );
+      if (!mounted) return;
+      final message = savedPath == null
+          ? 'Excel export started for ${selectedRows.length} selected member(s).'
+          : 'Excel file saved to $savedPath';
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text(message)));
+    } catch (error) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(
+        context,
+      ).showSnackBar(SnackBar(content: Text('Export failed: $error')));
+    }
+  }
+
   Future<void> _loadInvoices() async {
     if (_invoicesLoading) return;
 
@@ -1994,7 +2487,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
     try {
       final list = await _service.fetchInvoices(
         userId: _invoiceSelectedMemberOnly ? _selectedMemberId : null,
-        status: _invoiceStatus,
+        status: 'all',
         limit: 300,
       );
 
@@ -2045,165 +2538,105 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
-  bool _canReactivateInvoice(AdminInvoice invoice) {
-    final status = invoice.status.trim().toLowerCase();
-    return status == 'expired' || status == 'failed' || status == 'cancelled';
+  String _invoiceDisplayName(AdminInvoice invoice) {
+    final parts = <String>[
+      (invoice.name ?? '').trim(),
+      (invoice.surname ?? '').trim(),
+    ].where((part) => part.isNotEmpty).toList();
+    final fullName = parts.join(' ').trim();
+    final fallback = invoice.username.trim();
+    final accountCode = (invoice.accountNumber ?? '').trim();
+    final label = fullName.isNotEmpty ? fullName : fallback;
+    if (accountCode.isEmpty) return label;
+    return '$label ($accountCode)';
   }
 
-  bool _canActivateEftInvoice(AdminInvoice invoice) {
-    if (_invoiceMethodToken(invoice) != 'eft') return false;
+  DateTime? _invoiceSortDate(AdminInvoice invoice) =>
+      invoice.paidAt ?? invoice.completedAt ?? invoice.createdAt;
 
-    final status = invoice.status.trim().toLowerCase();
-    return status == 'awaiting_eft' ||
-        status == 'pending' ||
-        status == 'initiated';
+  int _invoiceNumericValue(String text) {
+    final digits = RegExp(r'\d+').allMatches(text).map((m) => m.group(0)!);
+    if (digits.isEmpty) return 0;
+    return int.tryParse(digits.join()) ?? 0;
   }
 
-  bool _canSendInvoiceEmails(AdminInvoice invoice) {
-    final status = invoice.status.trim().toLowerCase();
-    return status == 'paid' || status == 'completed';
+  int _compareInvoices(AdminInvoice a, AdminInvoice b) {
+    int result;
+    switch (_invoiceSortBy) {
+      case 'member':
+        result = _invoiceDisplayName(
+          a,
+        ).toLowerCase().compareTo(_invoiceDisplayName(b).toLowerCase());
+        break;
+      case 'invoice':
+        result = _invoiceNumericValue(
+          a.invoiceNumber,
+        ).compareTo(_invoiceNumericValue(b.invoiceNumber));
+        if (result == 0) {
+          result = a.invoiceNumber.toLowerCase().compareTo(
+            b.invoiceNumber.toLowerCase(),
+          );
+        }
+        break;
+      case 'status':
+        result = a.status.toLowerCase().compareTo(b.status.toLowerCase());
+        break;
+      case 'date':
+      default:
+        final aDate = _invoiceSortDate(a);
+        final bDate = _invoiceSortDate(b);
+        if (aDate == null && bDate == null) {
+          result = 0;
+        } else if (aDate == null) {
+          result = -1;
+        } else if (bDate == null) {
+          result = 1;
+        } else {
+          result = aDate.compareTo(bDate);
+        }
+        break;
+    }
+
+    return _invoiceSortDirection == 'ascending' ? result : -result;
   }
 
-  Future<void> _reactivateInvoice(AdminInvoice invoice) async {
-    if (_reactivatingInvoiceId != null) return;
+  String _invoiceAmountLabel(AdminInvoice invoice) =>
+      'R${invoice.totalAmount.toStringAsFixed(2)}';
 
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Reactivate payment?'),
-        content: Text(
-          'Reactivate ${invoice.invoiceNumber} and extend the checkout expiry so the user can pay again.',
+  Widget _invoiceHeaderCell(
+    String text, {
+    required double width,
+    TextAlign textAlign = TextAlign.left,
+  }) {
+    return SizedBox(
+      width: width,
+      child: Text(
+        text,
+        textAlign: textAlign,
+        style: const TextStyle(
+          fontSize: 15,
+          fontWeight: FontWeight.w700,
+          height: 1.2,
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Reactivate'),
-          ),
-        ],
       ),
     );
-
-    if (confirm != true) return;
-
-    setState(() => _reactivatingInvoiceId = invoice.id);
-    try {
-      final updated = await _service.reactivateInvoice(checkoutId: invoice.id);
-      if (!mounted) return;
-      setState(() {
-        _invoices = _invoices
-            .map((row) => row.id == updated.id ? updated : row)
-            .toList();
-      });
-      _toast('Payment reactivated.');
-    } catch (e) {
-      _toast('Reactivate payment failed: $e');
-    } finally {
-      if (mounted) setState(() => _reactivatingInvoiceId = null);
-    }
   }
 
-  Future<void> _activateEftInvoice(AdminInvoice invoice) async {
-    if (_activatingInvoiceId != null) return;
-
-    final confirm = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('Activate account?'),
-        content: Text(
-          'Mark ${invoice.invoiceNumber} as EFT paid and unlock ${invoice.username}.',
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('Activate'),
-          ),
-        ],
+  Widget _invoiceDataCell(
+    String text, {
+    required double width,
+    TextAlign textAlign = TextAlign.left,
+  }) {
+    return SizedBox(
+      width: width,
+      child: Text(
+        text,
+        textAlign: textAlign,
+        style: const TextStyle(fontSize: 13.5, height: 1.35),
+        overflow: TextOverflow.ellipsis,
+        maxLines: 2,
       ),
     );
-
-    if (confirm != true) return;
-
-    setState(() => _activatingInvoiceId = invoice.id);
-    try {
-      final updated = await _service.activateEftInvoice(checkoutId: invoice.id);
-
-      if (!mounted) return;
-      setState(() {
-        _invoices = _invoices
-            .map((row) => row.id == updated.id ? updated : row)
-            .toList();
-      });
-
-      if (updated.userId > 0) {
-        final detail = await _service.fetchMemberDetail(updated.userId);
-        if (!mounted) return;
-
-        setState(() {
-          _members = _members
-              .map((member) => member.id == detail.id ? detail : member)
-              .toList();
-          if (_memberDetail?.id == detail.id) {
-            _memberDetail = detail;
-          }
-        });
-      }
-
-      _toast('Account activated for EFT payment.');
-    } catch (e) {
-      _toast('Activate EFT failed: $e');
-    } finally {
-      if (mounted) setState(() => _activatingInvoiceId = null);
-    }
-  }
-
-  Future<void> _sendPaymentInvoiceEmail(AdminInvoice invoice) async {
-    if (_sendingPaymentEmailInvoiceId != null) return;
-
-    setState(() => _sendingPaymentEmailInvoiceId = invoice.id);
-    try {
-      final updated = await _service.sendPaymentInvoiceEmail(
-        checkoutId: invoice.id,
-      );
-      if (!mounted) return;
-      setState(() {
-        _invoices = _invoices
-            .map((row) => row.id == updated.id ? updated : row)
-            .toList();
-      });
-      _toast('Payment email sent.');
-    } catch (e) {
-      _toast('Send payment email failed: $e');
-    } finally {
-      if (mounted) setState(() => _sendingPaymentEmailInvoiceId = null);
-    }
-  }
-
-  Future<void> _sendWelcomeEmail(AdminInvoice invoice) async {
-    if (_sendingWelcomeEmailInvoiceId != null) return;
-
-    setState(() => _sendingWelcomeEmailInvoiceId = invoice.id);
-    try {
-      final updated = await _service.sendWelcomeEmail(checkoutId: invoice.id);
-      if (!mounted) return;
-      setState(() {
-        _invoices = _invoices
-            .map((row) => row.id == updated.id ? updated : row)
-            .toList();
-      });
-      _toast('Welcome email sent.');
-    } catch (e) {
-      _toast('Send welcome email failed: $e');
-    } finally {
-      if (mounted) setState(() => _sendingWelcomeEmailInvoiceId = null);
-    }
   }
 
   Future<void> _loadWhatsAppCalls() async {
@@ -2523,6 +2956,25 @@ class _AdminDashboardState extends State<AdminDashboard> {
     }
   }
 
+  Future<void> _openWhatsAppInboxComposer({
+    required String rawPhone,
+    String? name,
+  }) async {
+    final waUser = _normalizeWhatsappDigits(rawPhone);
+    if (waUser == null) {
+      _toast('Invalid WhatsApp number.');
+      return;
+    }
+
+    if (!mounted) return;
+    setState(() => _tab = 6);
+    await _waInboxKey.currentState?.openComposerForWaUser(
+      waUser: waUser,
+      title: name,
+      draftMessage: _defaultSupportWhatsAppMessage(name: name),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final loading = _membersLoading && _members.isEmpty;
@@ -2551,28 +3003,25 @@ class _AdminDashboardState extends State<AdminDashboard> {
             onDestinationSelected: (index) async {
               setState(() => _tab = index);
 
-              if (index == 2 && _members.isEmpty) {
-                await _loadMembers();
-              }
-              if (index == 3 &&
+              if (index == 2 &&
                   _appPortalAds.isEmpty &&
                   _largeAds.isEmpty &&
                   _smallAds.isEmpty) {
                 await _loadAds();
               }
-              if (index == 4 && _invites.isEmpty) {
+              if (index == 3 && _invites.isEmpty) {
                 await _loadInvites();
               }
-              if (index == 5 && _invoices.isEmpty) {
+              if (index == 4 && _invoices.isEmpty) {
                 await _loadInvoices();
               }
-              if (index == 6) {
+              if (index == 5) {
                 await _loadStats();
               }
-              if (index == 7) {
+              if (index == 6) {
                 await _waInboxKey.currentState?.refreshAll();
               }
-              if (index == 8 && _calls.isEmpty) {
+              if (index == 7 && _calls.isEmpty) {
                 await _loadWhatsAppCalls();
               }
             },
@@ -2581,10 +3030,6 @@ class _AdminDashboardState extends State<AdminDashboard> {
               NavigationRailDestination(
                 icon: Icon(Icons.people),
                 label: Text('Members'),
-              ),
-              NavigationRailDestination(
-                icon: Icon(Icons.build_circle_outlined),
-                label: Text('Tools'),
               ),
               NavigationRailDestination(
                 icon: Icon(Icons.notifications_active),
@@ -2634,72 +3079,331 @@ class _AdminDashboardState extends State<AdminDashboard> {
       case 0:
         return _membersTab();
       case 1:
-        return _toolsTab();
-      case 2:
         return _notificationsTab();
-      case 3:
+      case 2:
         return _adsTab();
-      case 4:
+      case 3:
         return _emailsTab();
-      case 5:
+      case 4:
         return _invoicesTab();
-      case 6:
+      case 5:
         return _statsTab();
-      case 7:
+      case 6:
         return _whatsAppInboxTab();
-      case 8:
+      case 7:
         return _whatsAppCallsTab();
       default:
         return _membersTab();
     }
   }
 
+  // ignore: unused_element
+  Widget _reportsTab() {
+    const selectionWidth = 56.0;
+    const codeWidth = 130.0;
+    const memberWidth = 240.0;
+    const emailWidth = 240.0;
+    const statusWidth = 130.0;
+    const amountWidth = 120.0;
+    const methodWidth = 150.0;
+    const paymentWidth = 170.0;
+    const daysWidth = 120.0;
+    const tableHorizontalPadding = 18.0;
+    const tableColumnGap = 20.0;
+    final tableWidth =
+        selectionWidth +
+        codeWidth +
+        memberWidth +
+        emailWidth +
+        statusWidth +
+        amountWidth +
+        methodWidth +
+        paymentWidth +
+        daysWidth +
+        (tableHorizontalPadding * 2) +
+        (tableColumnGap * 7);
+
+    final generatedAt = _paymentGapReportGeneratedAt;
+    final cutoff = _paymentGapReportCutoff;
+    final noPaymentCount = _paymentSummaryCount('No successful payment');
+    final pastMonthCount = _paymentSummaryCount('Payments in the past month');
+    final olderCount = _paymentSummaryCount('Payments older than a month');
+    final visibleRows = _paymentSummaryRows();
+    final selectedVisibleCount = visibleRows
+        .where((row) => _selectedPaymentReportUserIds.contains(row.user.id))
+        .length;
+    final allVisibleSelected =
+        visibleRows.isNotEmpty && selectedVisibleCount == visibleRows.length;
+    final partiallySelected =
+        selectedVisibleCount > 0 && selectedVisibleCount < visibleRows.length;
+
+    return Padding(
+      padding: const EdgeInsets.all(12),
+      child: Card(
+        child: Column(
+          children: [
+            ListTile(
+              title: const Text('Payment Summary Report'),
+              subtitle: Text(
+                'Cutoff: ${_fmtDate(cutoff)} • ${_paymentGapReportRows.length} row(s) • '
+                '$pastMonthCount in the past month • $olderCount older than a month • '
+                '$noPaymentCount with no successful payment',
+              ),
+              trailing: Wrap(
+                spacing: 8,
+                crossAxisAlignment: WrapCrossAlignment.center,
+                children: [
+                  const Text('Sort by'),
+                  DropdownButton<String>(
+                    value: _paymentSummarySortBy,
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'client_code',
+                        child: Text('Client code'),
+                      ),
+                      DropdownMenuItem(value: 'member', child: Text('Member')),
+                      DropdownMenuItem(value: 'email', child: Text('Email')),
+                      DropdownMenuItem(value: 'status', child: Text('Status')),
+                      DropdownMenuItem(value: 'amount', child: Text('Amount')),
+                      DropdownMenuItem(
+                        value: 'payment_method',
+                        child: Text('Payment method'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'last_payment',
+                        child: Text('Last payment'),
+                      ),
+                      DropdownMenuItem(
+                        value: 'days_ago',
+                        child: Text('Days ago'),
+                      ),
+                    ],
+                    onChanged: (value) {
+                      if (value == null) return;
+                      setState(() => _paymentSummarySortBy = value);
+                    },
+                  ),
+                  OutlinedButton.icon(
+                    onPressed: _selectedPaymentReportUserIds.isEmpty
+                        ? null
+                        : _exportSelectedPaymentSummaryRows,
+                    icon: const Icon(Icons.download),
+                    label: Text(
+                      _selectedPaymentReportUserIds.isEmpty
+                          ? 'Export selected'
+                          : 'Export selected (${_selectedPaymentReportUserIds.length})',
+                    ),
+                  ),
+                  if (generatedAt != null)
+                    Text(
+                      'Updated ${_fmtDate(generatedAt)}',
+                      style: Theme.of(context).textTheme.bodySmall,
+                    ),
+                  IconButton(
+                    onPressed: _reportLoading ? null : _loadPaymentGapReport,
+                    icon: const Icon(Icons.refresh),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(height: 1),
+            Expanded(
+              child: _reportLoading
+                  ? const Center(child: CircularProgressIndicator())
+                  : _reportError != null
+                  ? Center(child: Text('Error: $_reportError'))
+                  : visibleRows.isEmpty
+                  ? const Center(child: Text('No report rows found.'))
+                  : LayoutBuilder(
+                      builder: (context, constraints) => SingleChildScrollView(
+                        scrollDirection: Axis.horizontal,
+                        child: SizedBox(
+                          width: tableWidth > constraints.maxWidth
+                              ? tableWidth
+                              : constraints.maxWidth,
+                          child: Column(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: tableHorizontalPadding,
+                                  vertical: 14,
+                                ),
+                                color: Theme.of(context).colorScheme.surface,
+                                child: Row(
+                                  children: [
+                                    SizedBox(
+                                      width: selectionWidth,
+                                      child: Align(
+                                        alignment: Alignment.centerLeft,
+                                        child: Checkbox(
+                                          value: allVisibleSelected
+                                              ? true
+                                              : (partiallySelected
+                                                    ? null
+                                                    : false),
+                                          tristate: true,
+                                          onChanged: visibleRows.isEmpty
+                                              ? null
+                                              : (value) =>
+                                                    _toggleAllPaymentSummaryRows(
+                                                      visibleRows,
+                                                      value ?? false,
+                                                    ),
+                                        ),
+                                      ),
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Client code',
+                                      width: codeWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Member',
+                                      width: memberWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Email',
+                                      width: emailWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Status',
+                                      width: statusWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Amount',
+                                      width: amountWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Payment method',
+                                      width: methodWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Last payment',
+                                      width: paymentWidth,
+                                    ),
+                                    const SizedBox(width: tableColumnGap),
+                                    _invoiceHeaderCell(
+                                      'Days ago',
+                                      width: daysWidth,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              const Divider(height: 1, thickness: 1.2),
+                              Expanded(
+                                child: ListView.separated(
+                                  itemCount: visibleRows.length,
+                                  separatorBuilder: (_, index) =>
+                                      const Divider(height: 1, thickness: 1.1),
+                                  itemBuilder: (_, index) {
+                                    final row = visibleRows[index];
+                                    final user = row.user;
+
+                                    return Container(
+                                      padding: const EdgeInsets.symmetric(
+                                        horizontal: tableHorizontalPadding,
+                                        vertical: 14,
+                                      ),
+                                      child: Row(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.center,
+                                        children: [
+                                          SizedBox(
+                                            width: selectionWidth,
+                                            child: Align(
+                                              alignment: Alignment.centerLeft,
+                                              child: Checkbox(
+                                                value:
+                                                    _isPaymentSummaryRowSelected(
+                                                      row,
+                                                    ),
+                                                onChanged: (value) =>
+                                                    _togglePaymentSummaryRowSelection(
+                                                      row,
+                                                      value ?? false,
+                                                    ),
+                                              ),
+                                            ),
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            user.accountNumber ?? '—',
+                                            width: codeWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            _memberDisplayName(user),
+                                            width: memberWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            user.email.trim().isEmpty
+                                                ? '—'
+                                                : user.email.trim(),
+                                            width: emailWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            _paymentGapStatusLabel(user),
+                                            width: statusWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            _paymentGapAmountLabel(row),
+                                            width: amountWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            _paymentGapMethodLabel(row),
+                                            width: methodWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            _fmtDate(row.lastPaymentAt),
+                                            width: paymentWidth,
+                                          ),
+                                          const SizedBox(width: tableColumnGap),
+                                          _invoiceDataCell(
+                                            row.daysSincePayment?.toString() ??
+                                                '—',
+                                            width: daysWidth,
+                                          ),
+                                        ],
+                                      ),
+                                    );
+                                  },
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _membersTab() {
     final query = _memberSearchCtrl.text.trim().toLowerCase();
-    final nameFilter = _memberNameCtrl.text.trim().toLowerCase();
-    final accountFilter = _memberAccountCtrl.text.trim().toLowerCase();
-    final emailFilter = _memberEmailCtrl.text.trim().toLowerCase();
-    final dateFilter = _memberDateCtrl.text.trim().toLowerCase();
 
-    final visible = _members.where((u) {
-      final fullName = '${u.name ?? ''} ${u.surname ?? ''}'.trim();
-      final accountType = (u.plan ?? '').trim().toLowerCase();
-      final genericHay = [
-        u.username,
-        fullName,
-        u.email,
-        u.accountNumber ?? '',
-        u.whatsapp ?? '',
-        u.phone ?? '',
-        accountType,
-      ].join(' ').toLowerCase();
-
-      if (query.isNotEmpty && !genericHay.contains(query)) return false;
-      if (nameFilter.isNotEmpty &&
-          !_containsText('${u.username} $fullName', nameFilter)) {
-        return false;
-      }
-      if (accountFilter.isNotEmpty &&
-          !_containsText(u.accountNumber, accountFilter)) {
-        return false;
-      }
-      if (emailFilter.isNotEmpty && !_containsText(u.email, emailFilter)) {
-        return false;
-      }
-      if (dateFilter.isNotEmpty && !_dateMatches(u.createdAt, dateFilter)) {
-        return false;
-      }
-      if (_memberPlanFilter != 'all' && _memberPlanFilter == 'other') {
-        if (['free', 'premium', 'trial'].contains(accountType)) {
-          return false;
-        }
-      } else if (_memberPlanFilter != 'all' &&
-          accountType != _memberPlanFilter.trim().toLowerCase()) {
-        return false;
-      }
-
-      return true;
-    }).toList();
+    final visible =
+        _members.where((u) {
+          if (query.isEmpty) return true;
+          return _memberSearchHaystack(u).contains(query);
+        }).toList()..sort(
+          (a, b) => _memberDisplayName(
+            a,
+          ).toLowerCase().compareTo(_memberDisplayName(b).toLowerCase()),
+        );
 
     return Row(
       children: [
@@ -2725,7 +3429,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   child: TextField(
                     controller: _memberSearchCtrl,
                     decoration: InputDecoration(
-                      labelText: 'Search member',
+                      labelText: 'Search member by any detail',
                       border: const OutlineInputBorder(),
                       suffixIcon: query.isEmpty
                           ? const Icon(Icons.search)
@@ -2737,105 +3441,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
                               icon: const Icon(Icons.clear),
                             ),
                     ),
-                    onSubmitted: (_) => _loadMembers(),
+                    onChanged: (_) => setState(() {}),
                   ),
                 ),
                 Padding(
                   padding: const EdgeInsets.fromLTRB(12, 0, 12, 10),
-                  child: Wrap(
-                    spacing: 8,
-                    runSpacing: 8,
-                    children: [
-                      SizedBox(
-                        width: 210,
-                        child: TextField(
-                          controller: _memberNameCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Name / Username',
-                            border: OutlineInputBorder(),
-                          ),
-                          onChanged: (_) => setState(() {}),
-                        ),
+                  child: DropdownButtonFormField<String>(
+                    key: ValueKey('members-action-${_toolsAction ?? 'none'}'),
+                    initialValue: _toolsAction,
+                    decoration: const InputDecoration(
+                      labelText: 'Action',
+                      border: OutlineInputBorder(),
+                    ),
+                    hint: const Text('Select action'),
+                    items: const [
+                      DropdownMenuItem(
+                        value: 'Create user',
+                        child: Text('Create user'),
                       ),
-                      SizedBox(
-                        width: 210,
-                        child: TextField(
-                          controller: _memberAccountCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Account Number',
-                            border: OutlineInputBorder(),
-                          ),
-                          onChanged: (_) => setState(() {}),
-                        ),
+                      DropdownMenuItem(
+                        value: 'Edit user',
+                        child: Text('Edit user'),
                       ),
-                      SizedBox(
-                        width: 210,
-                        child: TextField(
-                          controller: _memberEmailCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Email Address',
-                            border: OutlineInputBorder(),
-                          ),
-                          onChanged: (_) => setState(() {}),
-                        ),
+                      DropdownMenuItem(
+                        value: 'Set password',
+                        child: Text('Set password'),
                       ),
-                      SizedBox(
-                        width: 140,
-                        child: TextField(
-                          controller: _memberDateCtrl,
-                          decoration: const InputDecoration(
-                            labelText: 'Date (YYYY-MM-DD)',
-                            border: OutlineInputBorder(),
-                          ),
-                          onChanged: (_) => setState(() {}),
-                        ),
-                      ),
-                      SizedBox(
-                        width: 130,
-                        child: DropdownButtonFormField<String>(
-                          initialValue: _memberPlanFilter,
-                          decoration: const InputDecoration(
-                            labelText: 'Account Type',
-                            border: OutlineInputBorder(),
-                          ),
-                          items: const [
-                            DropdownMenuItem(value: 'all', child: Text('All')),
-                            DropdownMenuItem(
-                              value: 'free',
-                              child: Text('Free'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'premium',
-                              child: Text('Premium'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'trial',
-                              child: Text('Trial'),
-                            ),
-                            DropdownMenuItem(
-                              value: 'other',
-                              child: Text('Other'),
-                            ),
-                          ],
-                          onChanged: (value) {
-                            if (value == null) return;
-                            setState(() => _memberPlanFilter = value);
-                          },
-                        ),
-                      ),
-                      OutlinedButton.icon(
-                        onPressed: () {
-                          _memberSearchCtrl.clear();
-                          _memberNameCtrl.clear();
-                          _memberAccountCtrl.clear();
-                          _memberEmailCtrl.clear();
-                          _memberDateCtrl.clear();
-                          setState(() => _memberPlanFilter = 'all');
-                        },
-                        icon: const Icon(Icons.clear_all),
-                        label: const Text('Clear Filters'),
+                      DropdownMenuItem(
+                        value: 'Toggle block',
+                        child: Text('Toggle block'),
                       ),
                     ],
+                    onChanged: _onToolsActionChanged,
                   ),
                 ),
                 if (supportsLocalDb)
@@ -2932,7 +3569,11 @@ class _AdminDashboardState extends State<AdminDashboard> {
           child: Card(
             margin: const EdgeInsets.fromLTRB(0, 12, 12, 12),
             child: _memberDetail == null
-                ? const Center(child: Text('Select a member to view details.'))
+                ? (_toolsAction == 'Create user'
+                      ? _memberToolsStandalonePanel()
+                      : const Center(
+                          child: Text('Select a member to view details.'),
+                        ))
                 : _memberDetailPanel(_memberDetail!),
           ),
         ),
@@ -2942,6 +3583,20 @@ class _AdminDashboardState extends State<AdminDashboard> {
 
   Widget _whatsAppInboxTab() {
     return WhatsAppMessagesPanel(key: _waInboxKey);
+  }
+
+  Widget _memberToolsStandalonePanel() {
+    return ListView(
+      padding: const EdgeInsets.all(14),
+      children: [
+        Text(
+          'Member Actions',
+          style: Theme.of(context).textTheme.headlineSmall,
+        ),
+        const SizedBox(height: 8),
+        _memberToolsSection(null),
+      ],
+    );
   }
 
   Widget _memberDetailPanel(AdminUser user) {
@@ -2972,8 +3627,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
         ),
         const SizedBox(height: 8),
         Wrap(
-          spacing: 10,
-          runSpacing: 8,
+          spacing: 8,
+          runSpacing: 6,
           children: [
             _info('Username', user.username),
             _info('Email', user.email),
@@ -3015,6 +3670,9 @@ class _AdminDashboardState extends State<AdminDashboard> {
             ),
           ],
         ),
+        const SizedBox(height: 14),
+        const Divider(),
+        _memberToolsSection(user),
         const SizedBox(height: 14),
         const Divider(),
         Row(
@@ -3089,431 +3747,466 @@ class _AdminDashboardState extends State<AdminDashboard> {
     );
   }
 
-  Widget _toolsTab() {
-    final selectedUser = _findMemberById(_toolsUserId ?? _selectedMemberId);
+  Widget _memberToolsSection(AdminUser? currentUser) {
+    final selectedUser = _toolsAction == 'Create user'
+        ? null
+        : (currentUser ??
+              _memberDetail ??
+              _findMemberById(_toolsUserId ?? _selectedMemberId));
 
-    return Padding(
-      padding: const EdgeInsets.all(12),
-      child: Card(
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: ListView(
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Member Actions', style: Theme.of(context).textTheme.titleMedium),
+        const SizedBox(height: 6),
+        if (_toolsAction == null) const Text('Select an action to continue.'),
+        if (_toolsAction != null &&
+            _toolsAction != 'Create user' &&
+            selectedUser == null)
+          const Text('Select a member from the list first.'),
+        if (_toolsAction == 'Create user') ...[
+          const SizedBox(height: 12),
+          Text('Create User', style: Theme.of(context).textTheme.titleLarge),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
             children: [
-              Text('Tools', style: Theme.of(context).textTheme.headlineSmall),
-              const SizedBox(height: 8),
-              const Text(
-                'Create users, send payment links, set member passwords, and block/unblock members.',
+              _toolsField(_toolCreateUsernameCtrl, 'Username', width: 260),
+              _toolsField(_toolCreateEmailCtrl, 'Email', width: 320),
+              _toolsField(_toolCreateNameCtrl, 'Name', width: 220),
+              _toolsField(_toolCreateSurnameCtrl, 'Surname', width: 220),
+              _toolsField(_toolCreatePhoneCtrl, 'Phone', width: 220),
+              _toolsField(_toolCreateWhatsAppCtrl, 'WhatsApp', width: 220),
+              _toolsField(_toolCreatePlanCtrl, 'Plan', width: 160),
+            ],
+          ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 12,
+            runSpacing: 4,
+            children: [
+              SizedBox(
+                width: 220,
+                child: CheckboxListTile(
+                  value: _toolCreateAndroid,
+                  onChanged: (value) {
+                    setState(() => _toolCreateAndroid = value == true);
+                  },
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Allow Android'),
+                ),
               ),
-              const SizedBox(height: 14),
-              Row(
-                children: [
-                  Expanded(
-                    child: DropdownButtonFormField<int>(
-                      initialValue: _toolsUserId ?? _selectedMemberId,
-                      decoration: const InputDecoration(
-                        labelText: 'Selected user',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: _members
-                          .map(
-                            (u) => DropdownMenuItem(
-                              value: u.id,
-                              child: Text('${u.username} • ${u.email}'),
-                            ),
-                          )
-                          .toList(),
-                      onChanged: _toolsAction == 'Create user'
-                          ? null
-                          : (value) {
-                              setState(() => _toolsUserId = value);
-                            },
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  SizedBox(
-                    width: 220,
-                    child: DropdownButtonFormField<String>(
-                      initialValue: _toolsAction,
-                      decoration: const InputDecoration(
-                        labelText: 'Action',
-                        border: OutlineInputBorder(),
-                      ),
-                      items: const [
-                        DropdownMenuItem(
-                          value: 'Create user',
-                          child: Text('Create user'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Set password',
-                          child: Text('Set password'),
-                        ),
-                        DropdownMenuItem(
-                          value: 'Toggle block',
-                          child: Text('Toggle block'),
-                        ),
-                      ],
-                      onChanged: (value) {
-                        if (value == null) return;
-                        setState(() {
-                          _toolsAction = value;
-                          if (_toolsAction != 'Create user') {
-                            _toolsUserId ??= _selectedMemberId;
-                          }
-                        });
-                      },
-                    ),
-                  ),
-                ],
+              SizedBox(
+                width: 220,
+                child: CheckboxListTile(
+                  value: _toolCreateWindows,
+                  onChanged: (value) {
+                    setState(() => _toolCreateWindows = value == true);
+                  },
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Allow Windows'),
+                ),
               ),
-              if (_toolsAction != 'Create user' && selectedUser == null)
-                const Padding(
-                  padding: EdgeInsets.only(top: 12),
-                  child: Text('Select a user first.'),
+              SizedBox(
+                width: 220,
+                child: CheckboxListTile(
+                  value: _toolCreateWeb,
+                  onChanged: (value) {
+                    setState(() => _toolCreateWeb = value == true);
+                  },
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Allow Web'),
                 ),
-              const SizedBox(height: 14),
-              const Divider(),
-              const SizedBox(height: 6),
-              if (_toolsAction == 'Create user') ...[
-                Text(
-                  'Create User',
-                  style: Theme.of(context).textTheme.titleLarge,
+              ),
+              SizedBox(
+                width: 220,
+                child: CheckboxListTile(
+                  value: _toolCreateBlocked,
+                  onChanged: (value) {
+                    setState(() => _toolCreateBlocked = value == true);
+                  },
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Create as inactive'),
                 ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    _toolsField(
-                      _toolCreateUsernameCtrl,
-                      'Username',
-                      width: 260,
-                    ),
-                    _toolsField(_toolCreateEmailCtrl, 'Email', width: 320),
-                    _toolsField(_toolCreateNameCtrl, 'Name', width: 220),
-                    _toolsField(_toolCreateSurnameCtrl, 'Surname', width: 220),
-                    _toolsField(_toolCreatePhoneCtrl, 'Phone', width: 220),
-                    _toolsField(
-                      _toolCreateWhatsAppCtrl,
-                      'WhatsApp',
-                      width: 220,
-                    ),
-                    _toolsField(_toolCreatePlanCtrl, 'Plan', width: 160),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 4,
-                  children: [
-                    SizedBox(
-                      width: 220,
-                      child: CheckboxListTile(
-                        value: _toolCreateAndroid,
-                        onChanged: (value) {
-                          setState(() => _toolCreateAndroid = value == true);
-                        },
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Allow Android'),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 220,
-                      child: CheckboxListTile(
-                        value: _toolCreateWindows,
-                        onChanged: (value) {
-                          setState(() => _toolCreateWindows = value == true);
-                        },
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Allow Windows'),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 220,
-                      child: CheckboxListTile(
-                        value: _toolCreateWeb,
-                        onChanged: (value) {
-                          setState(() => _toolCreateWeb = value == true);
-                        },
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Allow Web'),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 220,
-                      child: CheckboxListTile(
-                        value: _toolCreateBlocked,
-                        onChanged: (value) {
-                          setState(() => _toolCreateBlocked = value == true);
-                        },
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Create as inactive'),
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 8),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 8,
-                  crossAxisAlignment: WrapCrossAlignment.center,
-                  children: [
-                    SizedBox(
-                      width: 220,
-                      child: DropdownButtonFormField<String>(
-                        initialValue: _toolCreateBillingPreference,
-                        decoration: const InputDecoration(
-                          labelText: 'Billing preference',
-                          border: OutlineInputBorder(),
-                        ),
-                        items: const [
-                          DropdownMenuItem(
-                            value: 'subscription',
-                            child: Text('Subscription'),
-                          ),
-                          DropdownMenuItem(
-                            value: 'invoice_monthly',
-                            child: Text('Invoice Monthly'),
-                          ),
-                        ],
-                        onChanged: _toolCreateSendPaymentLink
-                            ? (value) {
-                                if (value == null) return;
-                                setState(
-                                  () => _toolCreateBillingPreference = value,
-                                );
-                              }
-                            : null,
-                      ),
-                    ),
-                    SizedBox(
-                      width: 220,
-                      child: CheckboxListTile(
-                        value: _toolCreateCheckoutAndroid,
-                        onChanged: _toolCreateSendPaymentLink
-                            ? (value) {
-                                setState(
-                                  () => _toolCreateCheckoutAndroid =
-                                      value == true,
-                                );
-                              }
-                            : null,
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Charge Android base'),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 220,
-                      child: CheckboxListTile(
-                        value: _toolCreateCheckoutWeb,
-                        onChanged: _toolCreateSendPaymentLink
-                            ? (value) {
-                                setState(
-                                  () => _toolCreateCheckoutWeb = value == true,
-                                );
-                              }
-                            : null,
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Charge Web base'),
-                      ),
-                    ),
-                    SizedBox(
-                      width: 380,
-                      child: Container(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 12,
-                          vertical: 10,
-                        ),
-                        decoration: BoxDecoration(
-                          borderRadius: BorderRadius.circular(10),
-                          border: Border.all(color: Colors.white24),
-                        ),
-                        child: const Text(
-                          'Add-on options',
-                          style: TextStyle(fontWeight: FontWeight.w700),
-                        ),
-                      ),
-                    ),
-                    for (final entry in _checkoutAddonLabels.entries) ...[
-                      SizedBox(
-                        width: 380,
-                        child: CheckboxListTile(
-                          value: _toolCreateCheckoutAddons.contains(entry.key),
-                          onChanged: _toolCreateSendPaymentLink
-                              ? (value) {
-                                  setState(() {
-                                    if (value == true) {
-                                      _toolCreateCheckoutAddons.add(entry.key);
-                                      if (_isPlatformSelectableAddon(
-                                        entry.key,
-                                      )) {
-                                        _toolCreateCheckoutAddonPlatforms[entry
-                                                .key] =
-                                            _toolCreateCheckoutAddonPlatforms[entry
-                                                .key] ??
-                                            'both';
-                                      }
-                                    } else {
-                                      _toolCreateCheckoutAddons.remove(
-                                        entry.key,
-                                      );
-                                      _toolCreateCheckoutAddonPlatforms.remove(
-                                        entry.key,
-                                      );
-                                    }
-                                  });
-                                }
-                              : null,
-                          contentPadding: EdgeInsets.zero,
-                          title: Text(entry.value),
-                        ),
-                      ),
-                      if (_toolCreateSendPaymentLink &&
-                          _toolCreateCheckoutAddons.contains(entry.key) &&
-                          _toolCreateCheckoutAndroid &&
-                          _toolCreateCheckoutWeb &&
-                          _isPlatformSelectableAddon(entry.key))
-                        SizedBox(
-                          width: 520,
-                          child: Padding(
-                            padding: const EdgeInsets.only(left: 10),
-                            child: SizedBox(
-                              width: 260,
-                              child: DropdownButtonFormField<String>(
-                                initialValue:
-                                    _toolCreateCheckoutAddonPlatforms[entry
-                                        .key] ??
-                                    'both',
-                                decoration: const InputDecoration(
-                                  labelText: 'Addon platform',
-                                  border: OutlineInputBorder(),
-                                  isDense: true,
-                                ),
-                                items: const [
-                                  DropdownMenuItem(
-                                    value: 'android',
-                                    child: Text('Android'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'web',
-                                    child: Text('Web'),
-                                  ),
-                                  DropdownMenuItem(
-                                    value: 'both',
-                                    child: Text('Both'),
-                                  ),
-                                ],
-                                onChanged: (value) {
-                                  if (value == null) return;
-                                  setState(
-                                    () =>
-                                        _toolCreateCheckoutAddonPlatforms[entry
-                                                .key] =
-                                            value,
-                                  );
-                                },
-                              ),
-                            ),
-                          ),
-                        ),
-                    ],
-                    SizedBox(
-                      width: 300,
-                      child: CheckboxListTile(
-                        value: _toolCreateSendPaymentLink,
-                        onChanged: (value) {
-                          setState(
-                            () => _toolCreateSendPaymentLink = value == true,
-                          );
-                        },
-                        contentPadding: EdgeInsets.zero,
-                        title: const Text('Send payment link after create'),
-                        subtitle: const Text(
-                          'Creates checkout with selected ticks and sends payment link + temp password + online password-change link via whatsapp_general.',
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-              if (_toolsAction == 'Set password') ...[
-                Text(
-                  selectedUser == null
-                      ? 'Set Password'
-                      : 'Set Password: ${selectedUser.username}',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 10),
-                const Text(
-                  'This updates the member password and revokes existing sessions.',
-                ),
-                const SizedBox(height: 10),
-                Wrap(
-                  spacing: 12,
-                  runSpacing: 12,
-                  children: [
-                    _toolsField(
-                      _toolPasswordCtrl,
-                      'New password',
-                      width: 260,
-                      obscure: true,
-                    ),
-                    _toolsField(
-                      _toolPasswordConfirmCtrl,
-                      'Confirm password',
-                      width: 260,
-                      obscure: true,
-                    ),
-                  ],
-                ),
-              ],
-              if (_toolsAction == 'Toggle block') ...[
-                Text(
-                  selectedUser == null
-                      ? 'Toggle Block'
-                      : 'Toggle Block: ${selectedUser.username}',
-                  style: Theme.of(context).textTheme.titleLarge,
-                ),
-                const SizedBox(height: 10),
-                Text(
-                  selectedUser == null
-                      ? 'Select a user first.'
-                      : (selectedUser.isBlocked
-                            ? 'User account is currently INACTIVE. Running action will attempt to activate.'
-                            : 'User account is currently ACTIVE. Running action will set inactive.'),
-                ),
-                const SizedBox(height: 8),
-                const Text(
-                  'Current sessions are revoked when block status changes.',
-                ),
-              ],
-              const SizedBox(height: 16),
-              FilledButton.icon(
-                onPressed: _toolsBusy ? null : _runToolsAction,
-                icon: _toolsBusy
-                    ? const SizedBox(
-                        width: 16,
-                        height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      )
-                    : const Icon(Icons.play_arrow),
-                label: Text(_toolsBusy ? 'Working...' : 'Run Action'),
               ),
             ],
           ),
+          const SizedBox(height: 8),
+          Wrap(
+            spacing: 12,
+            runSpacing: 8,
+            crossAxisAlignment: WrapCrossAlignment.center,
+            children: [
+              SizedBox(
+                width: 220,
+                child: DropdownButtonFormField<String>(
+                  key: ValueKey(
+                    'member-create-billing-$_toolCreateBillingPreference',
+                  ),
+                  initialValue: _toolCreateBillingPreference,
+                  decoration: const InputDecoration(
+                    labelText: 'Billing preference',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: const [
+                    DropdownMenuItem(
+                      value: 'subscription',
+                      child: Text('Subscription'),
+                    ),
+                    DropdownMenuItem(
+                      value: 'invoice_monthly',
+                      child: Text('Invoice Monthly'),
+                    ),
+                  ],
+                  onChanged: _toolCreateSendPaymentLink
+                      ? (value) {
+                          if (value == null) return;
+                          setState(() => _toolCreateBillingPreference = value);
+                        }
+                      : null,
+                ),
+              ),
+              SizedBox(
+                width: 220,
+                child: CheckboxListTile(
+                  value: _toolCreateCheckoutAndroid,
+                  onChanged: _toolCreateSendPaymentLink
+                      ? (value) {
+                          setState(
+                            () => _toolCreateCheckoutAndroid = value == true,
+                          );
+                        }
+                      : null,
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Charge Android base'),
+                ),
+              ),
+              SizedBox(
+                width: 220,
+                child: CheckboxListTile(
+                  value: _toolCreateCheckoutWeb,
+                  onChanged: _toolCreateSendPaymentLink
+                      ? (value) {
+                          setState(
+                            () => _toolCreateCheckoutWeb = value == true,
+                          );
+                        }
+                      : null,
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Charge Web base'),
+                ),
+              ),
+              SizedBox(
+                width: 380,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 10,
+                  ),
+                  decoration: BoxDecoration(
+                    borderRadius: BorderRadius.circular(10),
+                    border: Border.all(color: Colors.white24),
+                  ),
+                  child: const Text(
+                    'Add-on options',
+                    style: TextStyle(fontWeight: FontWeight.w700),
+                  ),
+                ),
+              ),
+              for (final entry in _checkoutAddonLabels.entries) ...[
+                SizedBox(
+                  width: 380,
+                  child: CheckboxListTile(
+                    value: _toolCreateCheckoutAddons.contains(entry.key),
+                    onChanged: _toolCreateSendPaymentLink
+                        ? (value) {
+                            setState(() {
+                              if (value == true) {
+                                _toolCreateCheckoutAddons.add(entry.key);
+                                if (_isPlatformSelectableAddon(entry.key)) {
+                                  _toolCreateCheckoutAddonPlatforms[entry.key] =
+                                      _toolCreateCheckoutAddonPlatforms[entry
+                                          .key] ??
+                                      'both';
+                                }
+                              } else {
+                                _toolCreateCheckoutAddons.remove(entry.key);
+                                _toolCreateCheckoutAddonPlatforms.remove(
+                                  entry.key,
+                                );
+                              }
+                            });
+                          }
+                        : null,
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: Text(entry.value),
+                  ),
+                ),
+                if (_toolCreateSendPaymentLink &&
+                    _toolCreateCheckoutAddons.contains(entry.key) &&
+                    _toolCreateCheckoutAndroid &&
+                    _toolCreateCheckoutWeb &&
+                    _isPlatformSelectableAddon(entry.key))
+                  SizedBox(
+                    width: 520,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 10),
+                      child: SizedBox(
+                        width: 260,
+                        child: DropdownButtonFormField<String>(
+                          initialValue:
+                              _toolCreateCheckoutAddonPlatforms[entry.key] ??
+                              'both',
+                          decoration: const InputDecoration(
+                            labelText: 'Addon platform',
+                            border: OutlineInputBorder(),
+                            isDense: true,
+                          ),
+                          items: const [
+                            DropdownMenuItem(
+                              value: 'android',
+                              child: Text('Android'),
+                            ),
+                            DropdownMenuItem(value: 'web', child: Text('Web')),
+                            DropdownMenuItem(
+                              value: 'both',
+                              child: Text('Both'),
+                            ),
+                          ],
+                          onChanged: (value) {
+                            if (value == null) return;
+                            setState(
+                              () =>
+                                  _toolCreateCheckoutAddonPlatforms[entry.key] =
+                                      value,
+                            );
+                          },
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+              SizedBox(
+                width: 300,
+                child: CheckboxListTile(
+                  value: _toolCreateSendPaymentLink,
+                  onChanged: (value) {
+                    setState(() => _toolCreateSendPaymentLink = value == true);
+                  },
+                  contentPadding: EdgeInsets.zero,
+                  controlAffinity: ListTileControlAffinity.leading,
+                  title: const Text('Send payment link after create'),
+                  subtitle: const Text(
+                    'Creates checkout with selected ticks and sends payment link + temp password + online password-change link via whatsapp_general.',
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+        if (_toolsAction == 'Edit user') ...[
+          const SizedBox(height: 12),
+          Text(
+            selectedUser == null
+                ? 'Edit User'
+                : 'Edit User: ${selectedUser.username}',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 10),
+          if (selectedUser == null) ...[
+            const Text('Select a user first.'),
+          ] else ...[
+            const Text(
+              'This updates the member profile and app access flags. Changing active status revokes current sessions.',
+            ),
+            const SizedBox(height: 10),
+            Wrap(
+              spacing: 12,
+              runSpacing: 12,
+              children: [
+                _toolsField(_toolCreateUsernameCtrl, 'Username', width: 260),
+                _toolsField(_toolCreateEmailCtrl, 'Email', width: 320),
+                _toolsField(_toolCreateNameCtrl, 'Name', width: 220),
+                _toolsField(_toolCreateSurnameCtrl, 'Surname', width: 220),
+                _toolsField(_toolCreatePhoneCtrl, 'Phone', width: 220),
+                _toolsField(_toolCreateWhatsAppCtrl, 'WhatsApp', width: 220),
+                _toolsField(_toolCreatePlanCtrl, 'Plan', width: 160),
+              ],
+            ),
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 4,
+              children: [
+                SizedBox(
+                  width: 220,
+                  child: CheckboxListTile(
+                    value: _toolCreateAndroid,
+                    onChanged: (value) {
+                      setState(() => _toolCreateAndroid = value == true);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Allow Android'),
+                  ),
+                ),
+                SizedBox(
+                  width: 220,
+                  child: CheckboxListTile(
+                    value: _toolCreateWindows,
+                    onChanged: (value) {
+                      setState(() => _toolCreateWindows = value == true);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Allow Windows'),
+                  ),
+                ),
+                SizedBox(
+                  width: 220,
+                  child: CheckboxListTile(
+                    value: _toolCreateWeb,
+                    onChanged: (value) {
+                      setState(() => _toolCreateWeb = value == true);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Allow Web'),
+                  ),
+                ),
+                SizedBox(
+                  width: 220,
+                  child: CheckboxListTile(
+                    value: _toolCreateBlocked,
+                    onChanged: (value) {
+                      setState(() => _toolCreateBlocked = value == true);
+                    },
+                    contentPadding: EdgeInsets.zero,
+                    controlAffinity: ListTileControlAffinity.leading,
+                    title: const Text('Set as inactive'),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            SizedBox(
+              width: 260,
+              child: DropdownButtonFormField<String>(
+                key: ValueKey(
+                  'member-edit-billing-$_toolCreateBillingPreference-${selectedUser.id}',
+                ),
+                initialValue: _toolCreateBillingPreference,
+                decoration: const InputDecoration(
+                  labelText: 'Billing preference',
+                  border: OutlineInputBorder(),
+                ),
+                items: const [
+                  DropdownMenuItem(
+                    value: 'subscription',
+                    child: Text('Subscription'),
+                  ),
+                  DropdownMenuItem(
+                    value: 'invoice_monthly',
+                    child: Text('Invoice Monthly'),
+                  ),
+                ],
+                onChanged: (value) {
+                  if (value == null) return;
+                  setState(() => _toolCreateBillingPreference = value);
+                },
+              ),
+            ),
+          ],
+        ],
+        if (_toolsAction == 'Set password') ...[
+          const SizedBox(height: 12),
+          Text(
+            selectedUser == null
+                ? 'Set Password'
+                : 'Set Password: ${selectedUser.username}',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 10),
+          const Text(
+            'This updates the member password and revokes existing sessions.',
+          ),
+          const SizedBox(height: 10),
+          Wrap(
+            spacing: 12,
+            runSpacing: 12,
+            children: [
+              _toolsField(
+                _toolPasswordCtrl,
+                'New password',
+                width: 260,
+                obscure: true,
+              ),
+              _toolsField(
+                _toolPasswordConfirmCtrl,
+                'Confirm password',
+                width: 260,
+                obscure: true,
+              ),
+            ],
+          ),
+        ],
+        if (_toolsAction == 'Toggle block') ...[
+          const SizedBox(height: 12),
+          Text(
+            selectedUser == null
+                ? 'Toggle Block'
+                : 'Toggle Block: ${selectedUser.username}',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
+          const SizedBox(height: 10),
+          Text(
+            selectedUser == null
+                ? 'Select a user first.'
+                : (selectedUser.isBlocked
+                      ? 'User account is currently INACTIVE. Running action will attempt to activate.'
+                      : 'User account is currently ACTIVE. Running action will set inactive.'),
+          ),
+          const SizedBox(height: 8),
+          const Text('Current sessions are revoked when block status changes.'),
+        ],
+        const SizedBox(height: 16),
+        FilledButton.icon(
+          onPressed: _toolsBusy || _toolsAction == null
+              ? null
+              : _runToolsAction,
+          icon: _toolsBusy
+              ? const SizedBox(
+                  width: 16,
+                  height: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : const Icon(Icons.play_arrow),
+          label: Text(_toolsBusy ? 'Working...' : 'Run Action'),
         ),
-      ),
+      ],
     );
   }
 
   Widget _info(String key, String value) {
     return Container(
-      constraints: const BoxConstraints(minWidth: 180),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      constraints: const BoxConstraints(minWidth: 145),
+      padding: const EdgeInsets.symmetric(horizontal: 9, vertical: 6),
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(10),
         border: Border.all(color: Colors.white12),
       ),
-      child: Text('$key: $value'),
+      child: Text(
+        '$key: $value',
+        style: const TextStyle(fontSize: 13, height: 1.2),
+      ),
     );
   }
 
@@ -4418,7 +5111,7 @@ class _AdminDashboardState extends State<AdminDashboard> {
                                     if (inviteWhatsApp.isNotEmpty)
                                       IconButton(
                                         tooltip: 'WhatsApp message',
-                                        onPressed: () => _openWhatsAppChat(
+                                        onPressed: () => _openWhatsAppInboxComposer(
                                           rawPhone: inviteWhatsApp,
                                           name:
                                               '${invite.name} ${invite.surname}',
@@ -4652,19 +5345,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
   }
 
   Widget _invoicesTab() {
+    const dateWidth = 170.0;
+    const memberWidth = 290.0;
+    const invoiceWidth = 170.0;
+    const amountWidth = 140.0;
+    const statusWidth = 150.0;
+    const methodWidth = 150.0;
+    const viewWidth = 110.0;
+    const tableHorizontalPadding = 18.0;
+    const tableColumnGap = 20.0;
+    final tableWidth =
+        dateWidth +
+        memberWidth +
+        invoiceWidth +
+        amountWidth +
+        statusWidth +
+        methodWidth +
+        viewWidth +
+        (tableHorizontalPadding * 2) +
+        (tableColumnGap * 6);
+
     final invoiceSearch = _invoiceSearchCtrl.text.trim().toLowerCase();
-    final invoiceDate = _invoiceDateCtrl.text.trim().toLowerCase();
 
     final visibleInvoices = _invoices.where((invoice) {
-      final method = _invoiceMethodToken(invoice);
       final hay = [
         invoice.invoiceNumber,
         invoice.username,
+        invoice.name ?? '',
+        invoice.surname ?? '',
         invoice.email,
         invoice.accountNumber ?? '',
         invoice.providerReference ?? '',
         invoice.token,
-        method,
         _invoiceMethodLabel(invoice),
         invoice.status,
       ].join(' ').toLowerCase();
@@ -4672,19 +5384,8 @@ class _AdminDashboardState extends State<AdminDashboard> {
       if (invoiceSearch.isNotEmpty && !hay.contains(invoiceSearch)) {
         return false;
       }
-      if (invoiceDate.isNotEmpty &&
-          !_dateMatches(
-            invoice.paidAt ?? invoice.completedAt ?? invoice.createdAt,
-            invoiceDate,
-          )) {
-        return false;
-      }
-      if (_invoiceMethodFilter != 'all' &&
-          method != _invoiceMethodFilter.trim().toLowerCase()) {
-        return false;
-      }
       return true;
-    }).toList();
+    }).toList()..sort(_compareInvoices);
 
     return Padding(
       padding: const EdgeInsets.all(12),
@@ -4701,53 +5402,38 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 spacing: 8,
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
+                  const Text('Sort by'),
                   DropdownButton<String>(
-                    value: _invoiceStatus,
+                    value: _invoiceSortBy,
                     items: const [
-                      DropdownMenuItem(value: 'all', child: Text('All')),
-                      DropdownMenuItem(value: 'paid', child: Text('Paid')),
+                      DropdownMenuItem(value: 'date', child: Text('Date')),
+                      DropdownMenuItem(value: 'member', child: Text('Member')),
                       DropdownMenuItem(
-                        value: 'pending',
-                        child: Text('Pending'),
+                        value: 'invoice',
+                        child: Text('Invoice nr'),
                       ),
-                      DropdownMenuItem(value: 'failed', child: Text('Failed')),
-                      DropdownMenuItem(
-                        value: 'expired',
-                        child: Text('Expired'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'cancelled',
-                        child: Text('Cancelled'),
-                      ),
-                      DropdownMenuItem(
-                        value: 'completed',
-                        child: Text('Completed'),
-                      ),
+                      DropdownMenuItem(value: 'status', child: Text('Status')),
                     ],
-                    onChanged: (v) async {
+                    onChanged: (v) {
                       if (v == null) return;
-                      setState(() => _invoiceStatus = v);
-                      await _loadInvoices();
+                      setState(() => _invoiceSortBy = v);
                     },
                   ),
                   DropdownButton<String>(
-                    value: _invoiceMethodFilter,
+                    value: _invoiceSortDirection,
                     items: const [
-                      DropdownMenuItem(value: 'all', child: Text('All Method')),
                       DropdownMenuItem(
-                        value: 'payfast',
-                        child: Text('PayFast'),
+                        value: 'ascending',
+                        child: Text('Ascending'),
                       ),
-                      DropdownMenuItem(value: 'ozow', child: Text('Ozow')),
-                      DropdownMenuItem(value: 'eft', child: Text('EFT')),
                       DropdownMenuItem(
-                        value: 'unknown',
-                        child: Text('Unknown'),
+                        value: 'descending',
+                        child: Text('Descending'),
                       ),
                     ],
                     onChanged: (v) {
                       if (v == null) return;
-                      setState(() => _invoiceMethodFilter = v);
+                      setState(() => _invoiceSortDirection = v);
                     },
                   ),
                   Row(
@@ -4779,26 +5465,22 @@ class _AdminDashboardState extends State<AdminDashboard> {
                 runSpacing: 8,
                 children: [
                   SizedBox(
-                    width: 340,
+                    width: 300,
+                    height: 40,
                     child: TextField(
                       controller: _invoiceSearchCtrl,
+                      expands: true,
+                      minLines: null,
+                      maxLines: null,
                       decoration: const InputDecoration(
-                        labelText:
-                            'Search invoice/user/account/email/ref/method',
+                        hintText: 'Search invoice/member/account/email/ref',
                         border: OutlineInputBorder(),
-                        prefixIcon: Icon(Icons.search),
-                      ),
-                      onChanged: (_) => setState(() {}),
-                    ),
-                  ),
-                  SizedBox(
-                    width: 180,
-                    child: TextField(
-                      controller: _invoiceDateCtrl,
-                      decoration: const InputDecoration(
-                        labelText: 'Date token',
-                        hintText: '2026-02-23',
-                        border: OutlineInputBorder(),
+                        isDense: true,
+                        contentPadding: EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 10,
+                        ),
+                        prefixIcon: Icon(Icons.search, size: 18),
                       ),
                       onChanged: (_) => setState(() {}),
                     ),
@@ -4806,8 +5488,10 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   OutlinedButton.icon(
                     onPressed: () {
                       _invoiceSearchCtrl.clear();
-                      _invoiceDateCtrl.clear();
-                      setState(() => _invoiceMethodFilter = 'all');
+                      setState(() {
+                        _invoiceSortBy = 'date';
+                        _invoiceSortDirection = 'descending';
+                      });
                     },
                     icon: const Icon(Icons.clear_all),
                     label: const Text('Clear'),
@@ -4823,136 +5507,198 @@ class _AdminDashboardState extends State<AdminDashboard> {
                   ? Center(child: Text('Error: $_invoicesError'))
                   : visibleInvoices.isEmpty
                   ? const Center(child: Text('No invoices found.'))
-                  : ListView.separated(
-                      itemCount: visibleInvoices.length,
-                      separatorBuilder: (_, index) => const Divider(height: 1),
-                      itemBuilder: (_, i) {
-                        final invoice = visibleInvoices[i];
-                        final methodLabel = _invoiceMethodLabel(invoice);
-                        final canReactivate = _canReactivateInvoice(invoice);
-                        final canActivateEft = _canActivateEftInvoice(invoice);
-                        final canSendEmails = _canSendInvoiceEmails(invoice);
-                        final activating = _activatingInvoiceId == invoice.id;
-                        final reactivating =
-                            _reactivatingInvoiceId == invoice.id;
-                        final sendingPaymentEmail =
-                            _sendingPaymentEmailInvoiceId == invoice.id;
-                        final sendingWelcomeEmail =
-                            _sendingWelcomeEmailInvoiceId == invoice.id;
-                        final invoiceDateText = _fmtDate(
-                          invoice.paidAt ??
-                              invoice.completedAt ??
-                              invoice.createdAt,
-                        );
+                  : LayoutBuilder(
+                      builder: (context, constraints) => Scrollbar(
+                        controller: _invoiceHorizontalScrollCtrl,
+                        thumbVisibility: true,
+                        notificationPredicate: (notification) =>
+                            notification.metrics.axis == Axis.horizontal,
+                        child: SingleChildScrollView(
+                          controller: _invoiceHorizontalScrollCtrl,
+                          scrollDirection: Axis.horizontal,
+                          child: SizedBox(
+                            width: tableWidth > constraints.maxWidth
+                                ? tableWidth
+                                : constraints.maxWidth,
+                            child: Column(
+                              children: [
+                                Container(
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: tableHorizontalPadding,
+                                    vertical: 14,
+                                  ),
+                                  color: Theme.of(context).colorScheme.surface,
+                                  child: Row(
+                                    children: [
+                                      _invoiceHeaderCell(
+                                        'Date',
+                                        width: dateWidth,
+                                      ),
+                                      const SizedBox(width: tableColumnGap),
+                                      _invoiceHeaderCell(
+                                        'Member',
+                                        width: memberWidth,
+                                      ),
+                                      const SizedBox(width: tableColumnGap),
+                                      _invoiceHeaderCell(
+                                        'Invoice nr',
+                                        width: invoiceWidth,
+                                      ),
+                                      const SizedBox(width: tableColumnGap),
+                                      _invoiceHeaderCell(
+                                        'Amount',
+                                        width: amountWidth,
+                                      ),
+                                      const SizedBox(width: tableColumnGap),
+                                      _invoiceHeaderCell(
+                                        'Status',
+                                        width: statusWidth,
+                                      ),
+                                      const SizedBox(width: tableColumnGap),
+                                      _invoiceHeaderCell(
+                                        'Method',
+                                        width: methodWidth,
+                                      ),
+                                      const SizedBox(width: tableColumnGap),
+                                      _invoiceHeaderCell(
+                                        'View',
+                                        width: viewWidth,
+                                      ),
+                                    ],
+                                  ),
+                                ),
+                                const Divider(height: 1, thickness: 1.2),
+                                Expanded(
+                                  child: Scrollbar(
+                                    controller: _invoiceVerticalScrollCtrl,
+                                    thumbVisibility: true,
+                                    child: ListView.separated(
+                                      controller: _invoiceVerticalScrollCtrl,
+                                      itemCount: visibleInvoices.length,
+                                      separatorBuilder: (_, index) =>
+                                          const Divider(
+                                            height: 1,
+                                            thickness: 1.1,
+                                          ),
+                                      itemBuilder: (_, i) {
+                                        final invoice = visibleInvoices[i];
+                                        final invoiceDateText = _fmtDate(
+                                          _invoiceSortDate(invoice),
+                                        );
+                                        final methodLabel = _invoiceMethodLabel(
+                                          invoice,
+                                        );
+                                        final checkoutUrl =
+                                            (invoice.checkoutUrl ?? '').trim();
 
-                        final actions = <Widget>[];
-                        if (canReactivate) {
-                          actions.add(
-                            TextButton(
-                              onPressed: reactivating
-                                  ? null
-                                  : () => _reactivateInvoice(invoice),
-                              child: reactivating
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Text('Reactivate payment'),
-                            ),
-                          );
-                        }
-                        if (canActivateEft) {
-                          actions.add(
-                            TextButton(
-                              onPressed: activating
-                                  ? null
-                                  : () => _activateEftInvoice(invoice),
-                              child: activating
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Text('Activate account'),
-                            ),
-                          );
-                        }
-                        if (canSendEmails) {
-                          actions.add(
-                            TextButton(
-                              onPressed: sendingPaymentEmail
-                                  ? null
-                                  : () => _sendPaymentInvoiceEmail(invoice),
-                              child: sendingPaymentEmail
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Text('Send payment email'),
-                            ),
-                          );
-                          actions.add(
-                            TextButton(
-                              onPressed: sendingWelcomeEmail
-                                  ? null
-                                  : () => _sendWelcomeEmail(invoice),
-                              child: sendingWelcomeEmail
-                                  ? const SizedBox(
-                                      width: 14,
-                                      height: 14,
-                                      child: CircularProgressIndicator(
-                                        strokeWidth: 2,
-                                      ),
-                                    )
-                                  : const Text('Send welcome email'),
-                            ),
-                          );
-                        }
-                        if ((invoice.checkoutUrl ?? '').trim().isNotEmpty) {
-                          actions.add(
-                            TextButton(
-                              onPressed: () =>
-                                  _openExternal(invoice.checkoutUrl!),
-                              child: const Text('Open'),
-                            ),
-                          );
-                        }
-
-                        return ListTile(
-                          leading: const Icon(Icons.receipt_long),
-                          title: Text(
-                            '${invoice.invoiceNumber} • ${invoice.totalAmount.toStringAsFixed(2)} ${invoice.currency}',
-                          ),
-                          subtitle: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              Text(
-                                '${invoice.username} (${invoice.accountNumber ?? 'no account'})\n'
-                                'Status: ${invoice.status} • Method: $methodLabel\n'
-                                'Ref: ${invoice.providerReference ?? invoice.token}'
-                                '${(invoice.billingCycle ?? '').trim().isEmpty ? '' : ' • Cycle: ${invoice.billingCycle}'}',
-                              ),
-                              if (actions.isNotEmpty) ...[
-                                const SizedBox(height: 4),
-                                Wrap(
-                                  spacing: 8,
-                                  runSpacing: 0,
-                                  children: actions,
+                                        return Container(
+                                          padding: const EdgeInsets.symmetric(
+                                            horizontal: tableHorizontalPadding,
+                                            vertical: 14,
+                                          ),
+                                          child: Row(
+                                            crossAxisAlignment:
+                                                CrossAxisAlignment.center,
+                                            children: [
+                                              _invoiceDataCell(
+                                                invoiceDateText,
+                                                width: dateWidth,
+                                              ),
+                                              const SizedBox(
+                                                width: tableColumnGap,
+                                              ),
+                                              _invoiceDataCell(
+                                                _invoiceDisplayName(invoice),
+                                                width: memberWidth,
+                                              ),
+                                              const SizedBox(
+                                                width: tableColumnGap,
+                                              ),
+                                              _invoiceDataCell(
+                                                invoice.invoiceNumber,
+                                                width: invoiceWidth,
+                                              ),
+                                              const SizedBox(
+                                                width: tableColumnGap,
+                                              ),
+                                              _invoiceDataCell(
+                                                _invoiceAmountLabel(invoice),
+                                                width: amountWidth,
+                                              ),
+                                              const SizedBox(
+                                                width: tableColumnGap,
+                                              ),
+                                              _invoiceDataCell(
+                                                invoice.status,
+                                                width: statusWidth,
+                                              ),
+                                              const SizedBox(
+                                                width: tableColumnGap,
+                                              ),
+                                              _invoiceDataCell(
+                                                methodLabel,
+                                                width: methodWidth,
+                                              ),
+                                              const SizedBox(
+                                                width: tableColumnGap,
+                                              ),
+                                              SizedBox(
+                                                width: viewWidth,
+                                                child: checkoutUrl.isEmpty
+                                                    ? const Text(
+                                                        '-',
+                                                        style: TextStyle(
+                                                          fontSize: 13.5,
+                                                          height: 1.35,
+                                                        ),
+                                                      )
+                                                    : Align(
+                                                        alignment: Alignment
+                                                            .centerLeft,
+                                                        child: TextButton(
+                                                          onPressed: () =>
+                                                              _openExternal(
+                                                                checkoutUrl,
+                                                              ),
+                                                          style: TextButton.styleFrom(
+                                                            padding:
+                                                                EdgeInsets.zero,
+                                                            minimumSize:
+                                                                const Size(
+                                                                  0,
+                                                                  0,
+                                                                ),
+                                                            tapTargetSize:
+                                                                MaterialTapTargetSize
+                                                                    .shrinkWrap,
+                                                            visualDensity:
+                                                                VisualDensity
+                                                                    .compact,
+                                                          ),
+                                                          child: const Text(
+                                                            'Open',
+                                                            style: TextStyle(
+                                                              fontSize: 13.5,
+                                                              fontWeight:
+                                                                  FontWeight
+                                                                      .w600,
+                                                            ),
+                                                          ),
+                                                        ),
+                                                      ),
+                                              ),
+                                            ],
+                                          ),
+                                        );
+                                      },
+                                    ),
+                                  ),
                                 ),
                               ],
-                            ],
+                            ),
                           ),
-                          trailing: Text(invoiceDateText),
-                        );
-                      },
+                        ),
+                      ),
                     ),
             ),
           ],

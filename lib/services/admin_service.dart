@@ -53,6 +53,30 @@ class AdminCreateMemberResult {
   });
 }
 
+class AdminWaConversationPage {
+  final List<AdminWaConversation> conversations;
+  final bool hasMore;
+
+  const AdminWaConversationPage({
+    required this.conversations,
+    required this.hasMore,
+  });
+}
+
+class AdminWaSendResult {
+  final bool ok;
+  final bool outside24HourWindow;
+  final AdminWaConversation? conversation;
+  final AdminWaMessage? message;
+
+  const AdminWaSendResult({
+    required this.ok,
+    required this.outside24HourWindow,
+    this.conversation,
+    this.message,
+  });
+}
+
 class AdminService {
   static const String _baseUrl = String.fromEnvironment(
     'ADMIN_API_BASE_URL',
@@ -403,6 +427,63 @@ class AdminService {
 
     throw Exception(
       _extractMessage(body) ?? 'Failed to create user (${res.statusCode}).',
+    );
+  }
+
+  Future<AdminUser> updateMemberUser({
+    required int userId,
+    required String username,
+    required String email,
+    required String name,
+    String? surname,
+    String? phone,
+    String? whatsapp,
+    String? plan,
+    bool appAndroid = false,
+    bool appWindows = false,
+    bool appWeb = false,
+    bool isBlocked = false,
+    String billingPreference = 'subscription',
+  }) async {
+    final uri = Uri.parse('$_baseUrl/api/admin/users/$userId');
+    final payload = <String, dynamic>{
+      'username': username.trim(),
+      'email': email.trim().toLowerCase(),
+      'name': name.trim(),
+      'app_android': appAndroid,
+      'app_windows': appWindows,
+      'app_web': appWeb,
+      'is_blocked': isBlocked,
+      'billing_preference': billingPreference.trim().isEmpty
+          ? 'subscription'
+          : billingPreference.trim(),
+      if ((surname ?? '').trim().isNotEmpty) 'surname': surname!.trim(),
+      if ((phone ?? '').trim().isNotEmpty) 'phone': phone!.trim(),
+      if ((whatsapp ?? '').trim().isNotEmpty) 'whatsapp': whatsapp!.trim(),
+      if ((plan ?? '').trim().isNotEmpty) 'plan': plan!.trim(),
+    };
+
+    final res = await http
+        .put(uri, headers: _headers(jsonBody: true), body: jsonEncode(payload))
+        .timeout(_timeout);
+    final body = _safeJson(res.body);
+
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      if (body is Map) {
+        final userRaw = body['user'];
+        if (userRaw is Map<String, dynamic>) {
+          return AdminUser.fromJson(userRaw);
+        }
+        if (userRaw is Map) {
+          return AdminUser.fromJson(userRaw.cast<String, dynamic>());
+        }
+      }
+      throw Exception('Member updated but response payload is missing user.');
+    }
+
+    throw Exception(
+      _extractMessage(body) ??
+          'Failed to update member details (${res.statusCode}).',
     );
   }
 
@@ -1045,13 +1126,23 @@ class AdminService {
     );
   }
 
-  Future<List<AdminWaConversation>> fetchWaConversations({
+  Future<AdminWaConversationPage> fetchWaConversationsPage({
     String? query,
     String status = 'all',
     int limit = 200,
+    DateTime? beforeLastMessageAt,
+    DateTime? beforeUpdatedAt,
+    int? beforeId,
   }) async {
     final params = <String, String>{'status': status, 'limit': '$limit'};
     if ((query ?? '').trim().isNotEmpty) params['q'] = query!.trim();
+    if (beforeLastMessageAt != null) {
+      params['before_last_message_at'] = beforeLastMessageAt.toIso8601String();
+    }
+    if (beforeUpdatedAt != null) {
+      params['before_updated_at'] = beforeUpdatedAt.toIso8601String();
+    }
+    if ((beforeId ?? 0) > 0) params['before_id'] = '$beforeId';
 
     final uri = Uri.parse(
       '$_baseUrl/api/wa/conversations',
@@ -1063,18 +1154,36 @@ class AdminService {
     if (res.statusCode >= 200 && res.statusCode < 300) {
       final listRaw = body is Map ? body['conversations'] : null;
       if (listRaw is List) {
-        return listRaw
+        final conversations = listRaw
             .whereType<Map>()
             .map((e) => AdminWaConversation.fromJson(e.cast<String, dynamic>()))
             .toList();
+        final hasMore = body is Map && body['has_more'] == true;
+        return AdminWaConversationPage(
+          conversations: conversations,
+          hasMore: hasMore,
+        );
       }
-      return [];
+      return const AdminWaConversationPage(conversations: [], hasMore: false);
     }
 
     throw Exception(
       _extractMessage(body) ??
           'Failed to load WhatsApp conversations (${res.statusCode}).',
     );
+  }
+
+  Future<List<AdminWaConversation>> fetchWaConversations({
+    String? query,
+    String status = 'all',
+    int limit = 200,
+  }) async {
+    final page = await fetchWaConversationsPage(
+      query: query,
+      status: status,
+      limit: limit,
+    );
+    return page.conversations;
   }
 
   Future<List<AdminWaMessage>> fetchWaConversationMessages(
@@ -1105,7 +1214,7 @@ class AdminService {
     );
   }
 
-  Future<void> sendWaMessage({
+  Future<AdminWaSendResult> sendWaMessage({
     int? conversationId,
     String? waUser,
     required String body,
@@ -1133,7 +1242,30 @@ class AdminService {
         .timeout(_timeout);
     final resBody = _safeJson(res.body);
 
-    if (res.statusCode >= 200 && res.statusCode < 300) return;
+    if (res.statusCode >= 200 && res.statusCode < 300) {
+      final map = resBody is Map
+          ? resBody.cast<String, dynamic>()
+          : <String, dynamic>{};
+      final conversationRaw = map['conversation'];
+      final messageRaw = map['message'];
+
+      return AdminWaSendResult(
+        ok: map['ok'] == true,
+        outside24HourWindow: map['outside_24h_window'] == true,
+        conversation: conversationRaw is Map<String, dynamic>
+            ? AdminWaConversation.fromJson(conversationRaw)
+            : (conversationRaw is Map
+                  ? AdminWaConversation.fromJson(
+                      conversationRaw.cast<String, dynamic>(),
+                    )
+                  : null),
+        message: messageRaw is Map<String, dynamic>
+            ? AdminWaMessage.fromJson(messageRaw)
+            : (messageRaw is Map
+                  ? AdminWaMessage.fromJson(messageRaw.cast<String, dynamic>())
+                  : null),
+      );
+    }
 
     throw Exception(
       _extractMessage(resBody) ??

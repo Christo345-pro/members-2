@@ -85,6 +85,7 @@ class AdminUser {
   final bool? appWeb;
   final String? appTypeRaw;
   final String? deviceType;
+  final String? billingPreference;
 
   /// e.g. "free", "premium", "trial", or your own labels.
   final String? plan;
@@ -128,6 +129,7 @@ class AdminUser {
     this.appWeb,
     this.appTypeRaw,
     this.deviceType,
+    this.billingPreference,
     this.plan,
     this.isAdmin,
     required this.isBlocked,
@@ -183,6 +185,9 @@ class AdminUser {
       appWeb: _getAppWebValue(json),
       appTypeRaw: _readString(json['app_type_raw'] ?? json['appTypeRaw']),
       deviceType: _readString(json['device_type'] ?? json['deviceType']),
+      billingPreference: _readString(
+        json['billing_preference'] ?? json['billingPreference'],
+      ),
       plan: _readString(
         json['plan'] ?? json['subscription_plan'] ?? json['tier'],
       ),
@@ -337,6 +342,8 @@ class AdminInvoice {
   final String? checkoutUrl;
   final int userId;
   final String username;
+  final String? name;
+  final String? surname;
   final String email;
   final String? accountNumber;
   final DateTime? paidAt;
@@ -357,6 +364,8 @@ class AdminInvoice {
     this.checkoutUrl,
     required this.userId,
     required this.username,
+    this.name,
+    this.surname,
     required this.email,
     this.accountNumber,
     this.paidAt,
@@ -387,6 +396,8 @@ class AdminInvoice {
         fallback: 0,
       ),
       username: (userMap['username'] ?? j['username'] ?? '').toString(),
+      name: _readString(userMap['name'] ?? j['name']),
+      surname: _readString(userMap['surname'] ?? j['surname']),
       email: (userMap['email'] ?? j['email'] ?? '').toString(),
       accountNumber: _readString(
         userMap['account_number'] ??
@@ -500,6 +511,7 @@ class AdminWaConversation {
   final String? lastMessagePreview;
   final DateTime? lastMessageAt;
   final DateTime? lastInboundAt;
+  final DateTime? updatedAt;
   final bool within24HourWindow;
   final DateTime? canReplyUntil;
   final int? userId;
@@ -515,6 +527,7 @@ class AdminWaConversation {
     this.lastMessagePreview,
     this.lastMessageAt,
     this.lastInboundAt,
+    this.updatedAt,
     required this.within24HourWindow,
     this.canReplyUntil,
     this.userId,
@@ -547,6 +560,7 @@ class AdminWaConversation {
       ),
       lastMessageAt: _parseDate(j['last_message_at'] ?? j['lastMessageAt']),
       lastInboundAt: _parseDate(j['last_inbound_at'] ?? j['lastInboundAt']),
+      updatedAt: _parseDate(j['updated_at'] ?? j['updatedAt']),
       within24HourWindow: _parseBool(
         j['within_24h_window'] ?? j['within24hWindow'],
       ),
